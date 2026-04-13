@@ -1,6 +1,6 @@
 import { connect } from 'mongoose';
 
-const MONGO_URI = process.env.MONGO_URI || 'mongodb+srv://fuse:fuse2024@cluster0.zd44z.mongodb.net/Fusedb?retryWrites=true&w=majority&appName=Cluster0';
+const MONGO_URI = process.env.MONGO_URI;
 
 const connectDB = async () => {
   try {
