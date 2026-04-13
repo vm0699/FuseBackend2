@@ -1,0 +1,11 @@
+# Node modules and logs
+node_modules/
+*.log
+*.tsbuildinfo
+
+# Environment files
+.env
+
+# Uploads (store only folder structure)
+uploads/*
+!uploads/.keep

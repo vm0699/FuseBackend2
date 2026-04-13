@@ -1,0 +1,360 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Twilio Video Call</title>
+  <script src="https://sdk.twilio.com/js/video/releases/2.21.0/twilio-video.min.js"></script>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      text-align: center;
+      background: linear-gradient(180deg, #1f1220 0%, #120f14 100%);
+      color: white;
+      margin: 0;
+      padding: 0;
+    }
+    #video-container {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      margin-top: 10px;
+    }
+    video {
+      width: 90%;
+      max-width: 600px;
+      border: 2px solid white;
+      border-radius: 10px;
+      margin-bottom: 10px;
+    }
+    #remote-media video {
+      width: 90%;
+      max-width: 600px;
+      border: 2px solid white;
+      border-radius: 10px;
+      margin-top: 10px;
+    }
+    #controls {
+      display: flex;
+      justify-content: center;
+      gap: 10px;
+      margin-top: 10px;
+    }
+    button {
+      padding: 12px;
+      font-size: 16px;
+      border-radius: 8px;
+      border: none;
+      cursor: pointer;
+      transition: 0.3s ease;
+    }
+    .btn-red {
+      background: red;
+      color: white;
+    }
+    .btn-green {
+      background: green;
+      color: white;
+    }
+    .btn-blue {
+      background: blue;
+      color: white;
+    }
+    .btn-gray {
+      background: gray;
+      color: white;
+    }
+    #chat-box {
+      width: 90%;
+      max-width: 500px;
+      height: 250px;
+      border: 1px solid white;
+      overflow-y: auto;
+      margin-top: 10px;
+      padding: 10px;
+      background: rgba(255, 255, 255, 0.1);
+      border-radius: 5px;
+    }
+    input {
+      width: 70%;
+      padding: 8px;
+      margin-top: 5px;
+      border-radius: 5px;
+      border: none;
+    }
+    #send-btn {
+      width: 25%;
+      padding: 8px;
+      margin-top: 5px;
+    }
+    .message {
+      text-align: left;
+      padding: 8px;
+      border-radius: 5px;
+      margin-bottom: 5px;
+    }
+    .message.you {
+      background: rgba(0, 200, 0, 0.3);
+      text-align: right;
+    }
+    .message.other {
+      background: rgba(0, 0, 200, 0.3);
+    }
+    #fuse-popup-backdrop {
+      position: fixed;
+      inset: 0;
+      display: none;
+      align-items: center;
+      justify-content: center;
+      padding: 24px;
+      background: rgba(17, 24, 39, 0.5);
+      z-index: 999;
+    }
+    #fuse-popup-backdrop.visible {
+      display: flex;
+    }
+    #fuse-popup-card {
+      width: 100%;
+      max-width: 360px;
+      background: #ffffff;
+      color: #1a1a1a;
+      border-radius: 24px;
+      padding: 20px 22px;
+      text-align: left;
+      box-shadow: 0 18px 50px rgba(0, 0, 0, 0.28);
+    }
+    #fuse-popup-badge {
+      display: inline-block;
+      padding: 6px 10px;
+      border-radius: 999px;
+      background: #ffe4e7;
+      color: #ff5864;
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      margin-bottom: 14px;
+    }
+    #fuse-popup-title {
+      font-size: 22px;
+      line-height: 28px;
+      font-weight: 700;
+      margin-bottom: 8px;
+    }
+    #fuse-popup-message {
+      font-size: 14px;
+      line-height: 21px;
+      color: #6b7280;
+    }
+    #fuse-popup-button {
+      margin-top: 18px;
+      width: 100%;
+      height: 50px;
+      border-radius: 25px;
+      background: #ff5864;
+      color: #ffffff;
+      font-weight: 700;
+    }
+  </style>
+</head>
+<body>
+  <h2>Twilio Video Call</h2>
+  <div id="video-container">
+    <video id="local-video" autoplay playsinline muted webkit-playsinline></video>
+    <div id="remote-media"></div>
+  </div>
+
+  <div id="controls">
+    <button id="toggle-mic" class="btn-green">Mute Mic</button>
+    <button id="toggle-video" class="btn-blue">Turn Off Video</button>
+    <button id="screen-share" class="btn-gray">Share Screen</button>
+    <button id="leave-room" class="btn-red">Leave Call</button>
+  </div>
+
+  <div id="chat-box"></div>
+  <input type="text" id="chat-input" placeholder="Type a message..." />
+  <button id="send-btn" onclick="sendMessage()">Send</button>
+
+  <div id="fuse-popup-backdrop">
+    <div id="fuse-popup-card">
+      <div id="fuse-popup-badge">FUSE</div>
+      <div id="fuse-popup-title"></div>
+      <div id="fuse-popup-message"></div>
+      <button id="fuse-popup-button" type="button">Got it</button>
+    </div>
+  </div>
+
+  <script>
+    let room;
+    let localTracks = [];
+    let screenTrack = null;
+    let dataTrack;
+    let isMicOn = true;
+    let isVideoOn = true;
+    let isSharingScreen = false;
+
+    const popupBackdrop = document.getElementById("fuse-popup-backdrop");
+    const popupTitle = document.getElementById("fuse-popup-title");
+    const popupMessage = document.getElementById("fuse-popup-message");
+    const popupButton = document.getElementById("fuse-popup-button");
+    let popupCloseHandler = null;
+
+    function showAppPopup(title, message, onClose) {
+      popupTitle.textContent = title;
+      popupMessage.textContent = message || "";
+      popupCloseHandler = onClose || null;
+      popupBackdrop.classList.add("visible");
+    }
+
+    function closeAppPopup() {
+      popupBackdrop.classList.remove("visible");
+      const handler = popupCloseHandler;
+      popupCloseHandler = null;
+      if (handler) handler();
+    }
+
+    popupBackdrop.addEventListener("click", (event) => {
+      if (event.target === popupBackdrop) closeAppPopup();
+    });
+    popupButton.addEventListener("click", closeAppPopup);
+
+    navigator.mediaDevices.getUserMedia({ video: true, audio: true }).then(() => {
+      console.log("Permissions granted.");
+    }).catch((err) => {
+      console.error("Permission error:", err);
+      showAppPopup("Permission denied", err.message);
+    });
+
+    async function startVideoCall() {
+      const urlParams = new URLSearchParams(window.location.search);
+      const token = urlParams.get("token");
+      const roomName = urlParams.get("room");
+
+      if (!token || !roomName) {
+        showAppPopup("Missing call details", "Missing token or room name in URL.");
+        return;
+      }
+
+      try {
+        const mediaStream = await navigator.mediaDevices.getUserMedia({
+          video: { width: 720, height: 480 },
+          audio: true,
+        });
+
+        const videoElement = document.getElementById("local-video");
+        videoElement.srcObject = mediaStream;
+        await videoElement.play();
+
+        videoElement.addEventListener("error", (e) => {
+          console.error("Video element error:", e);
+        });
+
+        localTracks = await Twilio.Video.createLocalTracks({
+          audio: true,
+          video: { width: 720, height: 480 },
+        });
+
+        setTimeout(async () => {
+          room = await Twilio.Video.connect(token, {
+            name: roomName,
+            tracks: localTracks,
+          });
+
+          console.log(`Connected to room: ${room.name}`);
+
+          room.participants.forEach(setupParticipantListeners);
+
+          room.on("participantConnected", setupParticipantListeners);
+          room.on("participantDisconnected", () => {
+            document.getElementById("remote-media").innerHTML = "";
+          });
+
+          dataTrack = new Twilio.Video.LocalDataTrack();
+          room.localParticipant.publishTrack(dataTrack);
+        }, 400);
+      } catch (error) {
+        console.error("Error in startVideoCall:", error);
+        showAppPopup("Unable to start call", "Check camera and microphone permissions.");
+      }
+    }
+
+    function setupParticipantListeners(participant) {
+      participant.tracks.forEach((pub) => {
+        if (pub.isSubscribed) attachTrack(pub.track);
+        pub.on("subscribed", attachTrack);
+      });
+      participant.on("trackSubscribed", attachTrack);
+    }
+
+    function attachTrack(track) {
+      if (track.kind === "video" || track.kind === "audio") {
+        document.getElementById("remote-media").appendChild(track.attach());
+      }
+    }
+
+    function sendMessage() {
+      const msg = document.getElementById("chat-input").value;
+      if (room && dataTrack && msg.trim() !== "") {
+        dataTrack.send(msg);
+        addChatMessage("You", msg, "you");
+        document.getElementById("chat-input").value = "";
+      }
+    }
+
+    function addChatMessage(sender, message, type) {
+      const chatBox = document.getElementById("chat-box");
+      const msgDiv = document.createElement("div");
+      msgDiv.classList.add("message", type);
+      msgDiv.innerHTML = `<strong>${sender}:</strong> ${message}`;
+      chatBox.appendChild(msgDiv);
+      chatBox.scrollTop = chatBox.scrollHeight;
+    }
+
+    document.getElementById("toggle-mic").onclick = () => {
+      isMicOn = !isMicOn;
+      localTracks.find((t) => t.kind === "audio").enable(isMicOn);
+      document.getElementById("toggle-mic").textContent = isMicOn ? "Mute Mic" : "Unmute Mic";
+    };
+
+    document.getElementById("toggle-video").onclick = () => {
+      isVideoOn = !isVideoOn;
+      localTracks.find((t) => t.kind === "video").enable(isVideoOn);
+      document.getElementById("toggle-video").textContent = isVideoOn ? "Turn Off Video" : "Turn On Video";
+    };
+
+    document.getElementById("screen-share").onclick = async () => {
+      if (!isSharingScreen) {
+        try {
+          screenTrack = await Twilio.Video.createLocalVideoTrack({
+            video: { frameRate: 15, width: 1280, height: 720 },
+          });
+          room.localParticipant.publishTrack(screenTrack);
+          isSharingScreen = true;
+          document.getElementById("screen-share").textContent = "Stop Sharing";
+        } catch (e) {
+          console.error("Screen share error:", e);
+        }
+      } else {
+        room.localParticipant.unpublishTrack(screenTrack);
+        screenTrack.stop();
+        isSharingScreen = false;
+        document.getElementById("screen-share").textContent = "Share Screen";
+      }
+    };
+
+    document.getElementById("leave-room").onclick = () => {
+      if (room) {
+        room.disconnect();
+        showAppPopup("Call ended", "You have left the call.", () => {
+          if (window.ReactNativeWebView) {
+            window.ReactNativeWebView.postMessage("LEAVE_CALL");
+          } else {
+            window.location.href = "/";
+          }
+        });
+      }
+    };
+
+    startVideoCall();
+  </script>
+</body>
+</html>
