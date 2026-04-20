@@ -90,6 +90,5 @@ ChatSchema.index(
 
 ChatSchema.index({ senderId: 1, status: 1, lastActivityAt: -1, _id: -1 });
 ChatSchema.index({ receiverId: 1, status: 1, lastActivityAt: -1, _id: -1 });
-ChatSchema.index({ pairKey: 1 });
 
 export default mongoose.model("Chat", ChatSchema);
