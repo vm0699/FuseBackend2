@@ -1,10 +1,200 @@
 import UserProfile from '../models/UserProfile.js';
 import Like from '../models/Like.js';
 import Chat from '../models/ChatModel.js';
+import { DeleteObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import client from "../config/twilio.js";
 import fs from 'fs';
 import path from 'path';
 import jwt from 'jsonwebtoken';
+
+const s3ClientConfig = {
+  region: process.env.AWS_REGION,
+};
+
+if (process.env.AWS_ACCESS_KEY_ID && process.env.AWS_SECRET_ACCESS_KEY) {
+  s3ClientConfig.credentials = {
+    accessKeyId: process.env.AWS_ACCESS_KEY_ID,
+    secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
+  };
+}
+
+const s3 = new S3Client(s3ClientConfig);
+const s3Bucket = process.env.AWS_S3_BUCKET;
+const s3PublicBaseUrl = process.env.AWS_S3_PUBLIC_BASE_URL;
+
+const ensureS3UploadConfig = () => {
+  const missing = [];
+
+  if (!process.env.AWS_REGION) missing.push("AWS_REGION");
+  if (!s3Bucket) missing.push("AWS_S3_BUCKET");
+
+  if (missing.length > 0) {
+    throw new Error(
+      `Missing required S3 configuration: ${missing.join(", ")}`
+    );
+  }
+};
+
+const getUploadExtension = (file) => {
+  const originalExtension = path.extname(file?.originalname || "").toLowerCase();
+  if (originalExtension) return originalExtension;
+
+  const byMimeType = {
+    "image/jpeg": ".jpg",
+    "image/jpg": ".jpg",
+    "image/png": ".png",
+  };
+
+  return byMimeType[file?.mimetype] || "";
+};
+
+const buildS3ObjectKey = (file, userId) => {
+  const extension = getUploadExtension(file);
+  const rawName = path.basename(file?.originalname || "upload", extension);
+  const safeName =
+    rawName.replace(/[^a-zA-Z0-9-_]/g, "-").replace(/-+/g, "-").slice(0, 60) ||
+    "upload";
+
+  return `profile-photos/${userId}/${Date.now()}-${safeName}${extension}`;
+};
+
+const encodeS3Key = (key) => key.split("/").map(encodeURIComponent).join("/");
+
+const buildS3PublicUrl = (key) => {
+  const encodedKey = encodeS3Key(key);
+
+  if (s3PublicBaseUrl) {
+    return `${s3PublicBaseUrl.replace(/\/+$/, "")}/${encodedKey}`;
+  }
+
+  return `https://${s3Bucket}.s3.${process.env.AWS_REGION}.amazonaws.com/${encodedKey}`;
+};
+
+const uploadPhotoToS3 = async (file, userId) => {
+  ensureS3UploadConfig();
+
+  if (!file?.buffer) {
+    throw new Error("Uploaded file buffer missing.");
+  }
+
+  const key = buildS3ObjectKey(file, userId);
+
+  await s3.send(
+    new PutObjectCommand({
+      Bucket: s3Bucket,
+      Key: key,
+      Body: file.buffer,
+      ContentType: file.mimetype,
+    })
+  );
+
+  return {
+    key,
+    url: buildS3PublicUrl(key),
+  };
+};
+
+const deleteLocalUploadIfPresent = (fileUrl, contextLabel = "photoCleanup") => {
+  if (typeof fileUrl !== "string" || !fileUrl.includes("/uploads/")) {
+    return;
+  }
+
+  const filename = fileUrl.split("/uploads/")[1];
+  if (!filename) {
+    return;
+  }
+
+  const decodedFilename = decodeURIComponent(filename.split("?")[0]);
+  const filePath = path.resolve("uploads", decodedFilename);
+
+  if (fs.existsSync(filePath)) {
+    fs.unlinkSync(filePath);
+    console.log(`🗑 [${contextLabel}] Deleted local upload:`, filePath);
+  }
+};
+
+const extractS3KeyFromUrl = (fileUrl) => {
+  if (typeof fileUrl !== "string" || fileUrl.trim().length === 0) {
+    return null;
+  }
+
+  if (s3PublicBaseUrl) {
+    const normalizedBase = s3PublicBaseUrl.replace(/\/+$/, "");
+    if (fileUrl.startsWith(`${normalizedBase}/`)) {
+      return decodeURIComponent(
+        fileUrl.slice(normalizedBase.length + 1).split(/[?#]/)[0]
+      );
+    }
+  }
+
+  try {
+    const parsed = new URL(fileUrl);
+    const pathname = parsed.pathname.replace(/^\/+/, "");
+
+    if (!pathname) {
+      return null;
+    }
+
+    if (s3Bucket && parsed.hostname === `${s3Bucket}.s3.${process.env.AWS_REGION}.amazonaws.com`) {
+      return decodeURIComponent(pathname);
+    }
+
+    if (s3Bucket && parsed.hostname === `${s3Bucket}.s3.amazonaws.com`) {
+      return decodeURIComponent(pathname);
+    }
+
+    if (
+      s3Bucket &&
+      parsed.hostname.includes("amazonaws.com") &&
+      pathname.startsWith(`${s3Bucket}/`)
+    ) {
+      return decodeURIComponent(pathname.slice(s3Bucket.length + 1));
+    }
+  } catch {
+    return null;
+  }
+
+  return null;
+};
+
+const deleteStoredPhotoIfPresent = async (
+  fileUrl,
+  contextLabel = "photoCleanup"
+) => {
+  const s3Key = extractS3KeyFromUrl(fileUrl);
+
+  if (s3Key) {
+    ensureS3UploadConfig();
+    await s3.send(
+      new DeleteObjectCommand({
+        Bucket: s3Bucket,
+        Key: s3Key,
+      })
+    );
+    console.log(`🗑 [${contextLabel}] Deleted S3 object:`, s3Key);
+    return;
+  }
+
+  deleteLocalUploadIfPresent(fileUrl, contextLabel);
+};
+
+const deleteStoredPhotos = async (photoUrls, contextLabel) => {
+  const results = await Promise.allSettled(
+    (photoUrls || []).map((photoUrl) =>
+      deleteStoredPhotoIfPresent(photoUrl, contextLabel)
+    )
+  );
+
+  results.forEach((result, index) => {
+    if (result.status === "rejected") {
+      console.error(
+        `🔥 [${contextLabel}] Failed to delete photo:`,
+        photoUrls[index],
+        result.reason
+      );
+    }
+  });
+};
 
 // Save or Update User Profile
 export const saveUserProfile = async (req, res) => {
@@ -199,6 +389,7 @@ export const getProfileByPhoneNumber = async (req, res) => {
     });
 
     // 📊 Calculate profile completeness
+
     const profileCompleteness = calculateProfileCompleteness(user);
 
     // 🖼 Normalize photo URLs
@@ -1073,7 +1264,10 @@ export const handleSwipe = async (req, res) => {
 
 
 
-export const uploadPhotos = async (req, res) => {
+const uploadPhotosLegacy = async (req, res) => {
+  let uploadedFileUrls = [];
+  let uploadPersisted = false;
+
   try {
     console.log('📸 [uploadPhotos] Full req.body:', req.body);
     console.log('📸 [uploadPhotos] Uploaded files:', req.files);
@@ -1101,6 +1295,86 @@ export const uploadPhotos = async (req, res) => {
       return res.status(400).json({
         success: false,
         message: 'No files were uploaded.',
+      });
+    }
+
+    {
+      const user = await UserProfile.findById(userId);
+
+      if (!user) {
+        return res.status(404).json({
+          success: false,
+          message: 'User not found.',
+        });
+      }
+
+      if (!Array.isArray(user.photos)) {
+        user.photos = [];
+      }
+
+      const s3UploadedFiles = await Promise.all(
+        req.files.map((file) => uploadPhotoToS3(file, userId))
+      );
+      const s3FileUrls = s3UploadedFiles.map((file) => file.url);
+      uploadedFileUrls = s3FileUrls;
+      console.log('ðŸ“¸ [uploadPhotos] S3 file URLs:', s3FileUrls);
+
+      const allowedOnboardingStages = [
+        "PHONE_VERIFIED",
+        "INTRO_DONE",
+        "PROFILE_SETUP_DONE",
+        "LOCATION_DONE",
+        "DETAILS_DONE",
+        "PROMPTS_DONE",
+        "PHOTOS_DONE",
+        "COMPLETE",
+      ];
+
+      const pendingFileDeletes = [];
+
+      if (replaceAll) {
+        console.log("â™»ï¸ [uploadPhotos] Replacing entire photo set");
+        for (const existingPhoto of user.photos || []) {
+          pendingFileDeletes.push(existingPhoto);
+        }
+        user.photos = s3FileUrls;
+      } else if (
+        replaceIndex !== null &&
+        Number.isInteger(replaceIndex) &&
+        replaceIndex >= 0
+      ) {
+        console.log(`ðŸ” [uploadPhotos] Replacing photo at index ${replaceIndex}`);
+        const existingPhoto = user.photos?.[replaceIndex];
+        if (existingPhoto && existingPhoto !== s3FileUrls[0]) {
+          pendingFileDeletes.push(existingPhoto);
+        }
+        user.photos[replaceIndex] = s3FileUrls[0];
+      } else {
+        console.log('âž• [uploadPhotos] Appending photos');
+        user.photos.push(...s3FileUrls);
+      }
+
+      if (
+        typeof requestedOnboardingStage === "string" &&
+        allowedOnboardingStages.includes(requestedOnboardingStage)
+      ) {
+        user.onboardingStage = requestedOnboardingStage;
+      }
+
+      await user.save();
+      uploadPersisted = true;
+      console.log('âœ… [uploadPhotos] Photos saved successfully');
+
+      await deleteStoredPhotos(pendingFileDeletes, "uploadPhotos");
+
+      return res.status(200).json({
+        success: true,
+        message: 'Photos uploaded successfully!',
+        data: {
+          photos: user.photos,
+          uploadedUrls: s3FileUrls,
+          onboardingStage: user.onboardingStage,
+        },
       });
     }
 
@@ -1186,9 +1460,7 @@ export const uploadPhotos = async (req, res) => {
     await user.save();
     console.log('✅ [uploadPhotos] Photos saved successfully');
 
-    for (const fileUrl of pendingFileDeletes) {
-      deleteLocalUploadIfPresent(fileUrl);
-    }
+    await deleteStoredPhotos(pendingFileDeletes, "updateUserProfile");
 
     return res.status(200).json({
       success: true,
@@ -1201,6 +1473,10 @@ export const uploadPhotos = async (req, res) => {
     });
   } catch (error) {
     console.error('🔥 [uploadPhotos] ERROR:', error);
+    if (!uploadPersisted && uploadedFileUrls.length > 0) {
+      await deleteStoredPhotos(uploadedFileUrls, "uploadPhotosRollback");
+    }
+
     return res.status(500).json({
       success: false,
       message: 'An error occurred while uploading photos.',
@@ -1212,6 +1488,128 @@ export const uploadPhotos = async (req, res) => {
 
 
 
+
+export const uploadPhotos = async (req, res) => {
+  let uploadedFileUrls = [];
+  let uploadPersisted = false;
+
+  try {
+    console.log("[uploadPhotos] Full req.body:", req.body);
+    console.log("[uploadPhotos] Uploaded files:", req.files);
+    console.log("[uploadPhotos] Auth user:", req.user);
+
+    const userId = req.user?.id;
+    const phoneFromToken = req.user?.phoneNumber;
+    const replaceIndex =
+      req.body.replaceIndex !== undefined && req.body.replaceIndex !== null
+        ? Number(req.body.replaceIndex)
+        : null;
+    const replaceAll =
+      req.body.replaceAll === true || req.body.replaceAll === "true";
+    const requestedOnboardingStage = req.body.onboardingStage;
+
+    if (!userId || !phoneFromToken) {
+      return res.status(401).json({
+        success: false,
+        message: "Unauthorized: missing user in token",
+      });
+    }
+
+    if (!req.files || req.files.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: "No files were uploaded.",
+      });
+    }
+
+    const user = await UserProfile.findById(userId);
+
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: "User not found.",
+      });
+    }
+
+    if (!Array.isArray(user.photos)) {
+      user.photos = [];
+    }
+
+    const uploadedFiles = await Promise.all(
+      req.files.map((file) => uploadPhotoToS3(file, userId))
+    );
+    const fileUrls = uploadedFiles.map((file) => file.url);
+    uploadedFileUrls = fileUrls;
+    console.log("[uploadPhotos] Uploaded S3 URLs:", fileUrls);
+
+    const allowedOnboardingStages = [
+      "PHONE_VERIFIED",
+      "INTRO_DONE",
+      "PROFILE_SETUP_DONE",
+      "LOCATION_DONE",
+      "DETAILS_DONE",
+      "PROMPTS_DONE",
+      "PHOTOS_DONE",
+      "COMPLETE",
+    ];
+
+    const pendingFileDeletes = [];
+
+    if (replaceAll) {
+      console.log("[uploadPhotos] Replacing entire photo set");
+      pendingFileDeletes.push(...(user.photos || []));
+      user.photos = fileUrls;
+    } else if (
+      replaceIndex !== null &&
+      Number.isInteger(replaceIndex) &&
+      replaceIndex >= 0
+    ) {
+      console.log(`[uploadPhotos] Replacing photo at index ${replaceIndex}`);
+      const existingPhoto = user.photos?.[replaceIndex];
+      if (existingPhoto && existingPhoto !== fileUrls[0]) {
+        pendingFileDeletes.push(existingPhoto);
+      }
+      user.photos[replaceIndex] = fileUrls[0];
+    } else {
+      console.log("[uploadPhotos] Appending photos");
+      user.photos.push(...fileUrls);
+    }
+
+    if (
+      typeof requestedOnboardingStage === "string" &&
+      allowedOnboardingStages.includes(requestedOnboardingStage)
+    ) {
+      user.onboardingStage = requestedOnboardingStage;
+    }
+
+    await user.save();
+    uploadPersisted = true;
+    console.log("[uploadPhotos] Photos saved successfully");
+
+    await deleteStoredPhotos(pendingFileDeletes, "uploadPhotos");
+
+    return res.status(200).json({
+      success: true,
+      message: "Photos uploaded successfully!",
+      data: {
+        photos: user.photos,
+        uploadedUrls: fileUrls,
+        onboardingStage: user.onboardingStage,
+      },
+    });
+  } catch (error) {
+    console.error("[uploadPhotos] ERROR:", error);
+
+    if (!uploadPersisted && uploadedFileUrls.length > 0) {
+      await deleteStoredPhotos(uploadedFileUrls, "uploadPhotosRollback");
+    }
+
+    return res.status(500).json({
+      success: false,
+      message: "An error occurred while uploading photos.",
+    });
+  }
+};
 
 // export const updateUserProfile = async (req, res) => {
 //   try {
@@ -1475,9 +1873,7 @@ export const updateUserProfile = async (req, res) => {
     await user.save();
     console.log("✅ [updateUserProfile] User saved.");
 
-    for (const fileUrl of pendingFileDeletes) {
-      deleteLocalUploadIfPresent(fileUrl);
-    }
+    await deleteStoredPhotos(pendingFileDeletes, "updateUserProfile");
 
     const profileCompleteness = calculateProfileCompleteness(user);
     console.log(
@@ -1767,6 +2163,8 @@ export const deletePhoto = async (req, res) => {
         }
       }
     }
+
+    await deleteStoredPhotoIfPresent(removedPhoto, "deletePhoto");
 
     const profileCompleteness = calculateProfileCompleteness(user);
     const fixedPhotos = (user.photos || []).map((p) => p);

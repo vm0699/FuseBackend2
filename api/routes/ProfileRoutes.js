@@ -3,11 +3,11 @@ import {
   saveUserProfile,
   getProfileByPhoneNumber,
   getFilteredProfiles,
-  uploadPhotos,
   updateUserProfile,
   reorderPhotos,
   deletePhoto,
 } from '../controllers/ProfileController.js';
+import { uploadPhotos } from '../controllers/ProfilePhotoController.js';
 import { handleSwipe } from '../controllers/SwipeController.js';
 import authMiddleware from '../middleware/authMiddleware.js';
 import upload from '../middleware/FileUpload.js';

@@ -355,6 +355,7 @@ export const getUserChats = async (req, res) => {
             id: otherUser._id?.toString?.() || otherUser._id,
             name: otherUser.name || "Unknown User",
             username: otherUser.username || "",
+            photos: Array.isArray(otherUser.photos) ? otherUser.photos : [],
           },
           lastMessage: lastMsg,
           complimentPreview: lastMsg ? lastMsg.message : null,

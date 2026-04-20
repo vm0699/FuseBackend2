@@ -4,6 +4,41 @@ import Chat from '../models/ChatModel.js';
 import { DeleteObjectCommand } from '@aws-sdk/client-s3';
 import { S3Client } from '@aws-sdk/client-s3';
 
+const extractS3KeyFromUrl = (fileUrl) => {
+  if (typeof fileUrl !== 'string' || fileUrl.trim().length === 0) {
+    return null;
+  }
+
+  try {
+    const parsed = new URL(fileUrl);
+    const pathname = parsed.pathname.replace(/^\/+/, '');
+
+    if (!pathname) {
+      return null;
+    }
+
+    if (process.env.AWS_S3_BUCKET) {
+      const regionalHost = `${process.env.AWS_S3_BUCKET}.s3.${process.env.AWS_REGION}.amazonaws.com`;
+      const globalHost = `${process.env.AWS_S3_BUCKET}.s3.amazonaws.com`;
+
+      if (parsed.hostname === regionalHost || parsed.hostname === globalHost) {
+        return decodeURIComponent(pathname);
+      }
+
+      if (
+        parsed.hostname.includes('amazonaws.com') &&
+        pathname.startsWith(`${process.env.AWS_S3_BUCKET}/`)
+      ) {
+        return decodeURIComponent(pathname.slice(process.env.AWS_S3_BUCKET.length + 1));
+      }
+    }
+  } catch {
+    return null;
+  }
+
+  return null;
+};
+
 // ✅ Get User Profile
 export const getProfile = async (req, res) => {
   try {
@@ -170,10 +205,14 @@ export const deleteAccount = async (req, res) => {
     // 5. Delete user's uploaded photos from S3
     if (user.photos && user.photos.length > 0) {
       const deletePromises = user.photos.map((url) => {
-        const filename = url.split('/').pop();
+        const key = extractS3KeyFromUrl(url);
+        if (!key) {
+          return Promise.resolve();
+        }
+
         const command = new DeleteObjectCommand({
           Bucket: process.env.AWS_S3_BUCKET,
-          Key: filename,
+          Key: key,
         });
         return s3.send(command);
       });
