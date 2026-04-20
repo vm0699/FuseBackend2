@@ -1,8 +1,8 @@
 import Like from "../models/Like.js";
 import Chat from "../models/ChatModel.js";
 import UserProfile from "../models/UserProfile.js";
-import client from "../config/twilio.js";
 import { deriveSwipeState, getSwipeTransition } from "../lib/swipeStateMachine.js";
+import { ensureChatTwilioChannel } from "../services/chatTwilioService.js";
 
 const ACTIVE_CHAT_STATUSES = ["pending", "accepted"];
 
@@ -19,54 +19,6 @@ const buildNoMatchResponse = ({
   swipeState,
 });
 
-const ensureTwilioChannelForMatch = async ({
-  chatId,
-  userAId,
-  userBId,
-  pairKey,
-}) => {
-  let chat = await Chat.findById(chatId);
-  if (!chat || !ACTIVE_CHAT_STATUSES.includes(chat.status)) {
-    return null;
-  }
-
-  if (chat.twilioChannelSid || chat.twilioChatChannelSid) {
-    return chat;
-  }
-
-  try {
-    const service = client.chat.v2.services(process.env.TWILIO_CHAT_SERVICE_SID);
-    const friendlyName = `${userAId}-${userBId}`;
-    const uniqueName = `chat-${pairKey}`;
-    const created = await service.channels.create({ friendlyName, uniqueName });
-
-    const updatedChat = await Chat.findOneAndUpdate(
-      {
-        _id: chatId,
-        status: { $in: ACTIVE_CHAT_STATUSES },
-        $or: [
-          { twilioChannelSid: { $exists: false } },
-          { twilioChannelSid: null },
-          { twilioChannelSid: "" },
-        ],
-      },
-      {
-        $set: {
-          twilioChannelSid: created.sid,
-          twilioChatChannelSid: created.sid,
-          participants: [userAId, userBId],
-        },
-      },
-      { new: true }
-    );
-
-    return updatedChat || (await Chat.findById(chatId));
-  } catch (err) {
-    console.log("Twilio channel creation skipped:", err?.message);
-    return await Chat.findById(chatId);
-  }
-};
-
 const resolveActiveChatForPair = async ({ pairKey, userAId, userBId }) => {
   let chat = await Chat.findOne({
     pairKey,
@@ -79,9 +31,9 @@ const resolveActiveChatForPair = async ({ pairKey, userAId, userBId }) => {
         senderId: userAId,
         receiverId: userBId,
         status: "accepted",
-        messages: [],
         pairKey,
         participants: [userAId, userBId],
+        lastActivityAt: new Date(),
       });
     } catch (err) {
       if (err?.code !== 11000) {
@@ -96,6 +48,7 @@ const resolveActiveChatForPair = async ({ pairKey, userAId, userBId }) => {
   } else if (chat.status === "pending") {
     chat.status = "accepted";
     chat.participants = [userAId, userBId];
+    chat.lastActivityAt = new Date();
     await chat.save();
   }
 
@@ -121,12 +74,15 @@ const buildMatchResponse = async ({
     throw new Error("Failed to resolve active chat for matched pair");
   }
 
-  const channelChat = await ensureTwilioChannelForMatch({
-    chatId: chat._id,
-    userAId: loggedInUserId,
-    userBId: swipedUserId,
-    pairKey,
-  });
+  try {
+    await ensureChatTwilioChannel({
+      chat,
+      userAId: loggedInUserId,
+      userBId: swipedUserId,
+    });
+  } catch (error) {
+    console.log("Twilio channel provisioning skipped:", error?.message || error);
+  }
 
   return {
     success: true,
@@ -135,7 +91,7 @@ const buildMatchResponse = async ({
     swipeState: "matched",
     chatId: chat._id,
     twilioChannelSid:
-      channelChat?.twilioChannelSid || channelChat?.twilioChatChannelSid || null,
+      chat?.twilioChannelSid || chat?.twilioChatChannelSid || null,
     otherUser: {
       _id: swipedUser._id,
       name: swipedUser.name,
@@ -179,7 +135,7 @@ export const handleSwipe = async (req, res) => {
         Chat.findOne({
           pairKey,
           status: { $in: ACTIVE_CHAT_STATUSES },
-        }).select("_id status twilioChannelSid twilioChatChannelSid"),
+        }).select("_id status pairKey twilioChannelSid twilioChatChannelSid twilioMembersInitialized"),
       ]);
 
     if (!loggedInUser || !swipedUser) {

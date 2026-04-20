@@ -144,6 +144,8 @@ profileSchema.pre("save", function syncLocationGeo(next) {
 });
 
 profileSchema.index({ locationGeo: "2dsphere" });
+profileSchema.index({ onboardingStage: 1, gender: 1, dateOfBirth: 1, updatedAt: -1 });
+profileSchema.index({ onboardingStage: 1, updatedAt: -1 });
 profileSchema.index({ gender: 1, updatedAt: -1 });
 profileSchema.index({ gender: 1, dateOfBirth: 1, updatedAt: -1 });
 

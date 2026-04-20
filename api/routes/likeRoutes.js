@@ -5,6 +5,18 @@ import authMiddleware from "../middleware/authMiddleware.js";
 
 const router = Router();
 
+const getChatPreviewMessage = (chat) => {
+  if (chat?.lastMessageSummary && chat?.lastMessageAt) {
+    return {
+      message: chat.lastMessageSummary,
+      timestamp: chat.lastMessageAt,
+    };
+  }
+
+  const legacyMessages = Array.isArray(chat?.messages) ? chat.messages : [];
+  return legacyMessages.length ? legacyMessages[legacyMessages.length - 1] : null;
+};
+
 const profileSelection =
   "_id name username photos dateOfBirth gender height interests values prompts pronouns sexuality work jobTitle college educationLevel homeTown religion zodiacSign politics ethnicity drinking smoking marijuana drugs datingIntentions relationshipType children familyPlans pets languages";
 
@@ -112,7 +124,11 @@ router.get("/likedyou", authMiddleware, async (req, res) => {
       receiverId: userId,
       status: "pending",
     })
-      .sort({ updatedAt: -1, createdAt: -1, _id: -1 })
+      .sort({ lastActivityAt: -1, updatedAt: -1, createdAt: -1, _id: -1 })
+      .select(
+        "senderId twilioChannelSid twilioChatChannelSid lastMessageSummary lastMessageAt lastActivityAt messages"
+      )
+      .slice("messages", -1)
       .populate("senderId", profileSelection)
       .lean();
 
@@ -121,10 +137,7 @@ router.get("/likedyou", authMiddleware, async (req, res) => {
         const sender = chat.senderId;
         if (!sender) return null;
 
-        const lastMsg =
-          chat.messages?.length > 0
-            ? chat.messages[chat.messages.length - 1]
-            : null;
+        const lastMsg = getChatPreviewMessage(chat);
 
         return {
           _id: sender._id,

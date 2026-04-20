@@ -1,6 +1,7 @@
 import UserProfile from '../models/UserProfile.js';
 import Like from '../models/Like.js';
 import Chat from '../models/ChatModel.js';
+import Block from "../models/Block.js";
 import { DeleteObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import client from "../config/twilio.js";
 import fs from 'fs';
@@ -502,8 +503,48 @@ export const getProfileByPhoneNumber = async (req, res) => {
 
 const DEFAULT_DISCOVERY_LIMIT = 8;
 const MAX_DISCOVERY_LIMIT = 20;
+const DISCOVERY_CANDIDATE_BUFFER = 48;
+const DISCOVERY_CANDIDATE_MULTIPLIER = 6;
+const MAX_DISCOVERY_CANDIDATES = 240;
 const EARTH_RADIUS_KM = 6371;
 const DEG_TO_RAD = Math.PI / 180;
+const DISCOVERY_PROFILE_SELECT = [
+  "_id",
+  "name",
+  "username",
+  "dateOfBirth",
+  "gender",
+  "height",
+  "interests",
+  "values",
+  "prompts",
+  "photos",
+  "pronouns",
+  "sexuality",
+  "work",
+  "jobTitle",
+  "college",
+  "educationLevel",
+  "religion",
+  "homeTown",
+  "politics",
+  "languages",
+  "datingIntentions",
+  "relationshipType",
+  "ethnicity",
+  "children",
+  "familyPlans",
+  "covidVaccine",
+  "pets",
+  "zodiacSign",
+  "drinking",
+  "smoking",
+  "marijuana",
+  "drugs",
+  "location",
+  "locationGeo",
+  "updatedAt",
+].join(" ");
 
 function parseDiscoveryNumber(value, fallback) {
   const parsed = Number.parseInt(value, 10);
@@ -607,52 +648,145 @@ function buildBaseDiscoveryMatch({
   return match;
 }
 
-function buildDistanceKmExpression(latitude, longitude) {
-  const requesterLatRad = latitude * DEG_TO_RAD;
-  const requesterLngRad = longitude * DEG_TO_RAD;
-  const candidateLatRad = {
-    $multiply: [{ $ifNull: ["$location.latitude", 0] }, DEG_TO_RAD],
-  };
-  const candidateLngRad = {
-    $multiply: [{ $ifNull: ["$location.longitude", 0] }, DEG_TO_RAD],
-  };
+async function getBlockedProfileIds(userId) {
+  const blocks = await Block.find({
+    $or: [{ blockerId: userId }, { blockedId: userId }],
+  })
+    .select("blockerId blockedId")
+    .lean();
 
-  const acosInput = {
-    $add: [
-      {
-        $multiply: [Math.sin(requesterLatRad), { $sin: candidateLatRad }],
-      },
-      {
-        $multiply: [
-          Math.cos(requesterLatRad),
-          { $cos: candidateLatRad },
-          { $cos: { $subtract: [candidateLngRad, requesterLngRad] } },
-        ],
-      },
-    ],
-  };
+  return blocks.reduce((blockedIds, block) => {
+    const otherUserId =
+      block.blockerId?.toString?.() === userId.toString()
+        ? block.blockedId?.toString?.()
+        : block.blockerId?.toString?.();
 
-  return {
-    $cond: [
-      {
-        $and: [
-          { $ne: ["$location.latitude", null] },
-          { $ne: ["$location.longitude", null] },
-        ],
-      },
-      {
-        $multiply: [
-          EARTH_RADIUS_KM,
-          {
-            $acos: {
-              $min: [1, { $max: [-1, acosInput] }],
-            },
-          },
-        ],
-      },
-      null,
-    ],
-  };
+    if (otherUserId) {
+      blockedIds.push(otherUserId);
+    }
+
+    return blockedIds;
+  }, []);
+}
+
+function buildDiscoveryCandidateLimit(targetCount) {
+  return Math.min(
+    Math.max(
+      targetCount * DISCOVERY_CANDIDATE_MULTIPLIER,
+      targetCount + DISCOVERY_CANDIDATE_BUFFER
+    ),
+    MAX_DISCOVERY_CANDIDATES
+  );
+}
+
+function calculateDistanceKm(latitudeA, longitudeA, latitudeB, longitudeB) {
+  if (
+    typeof latitudeA !== "number" ||
+    typeof longitudeA !== "number" ||
+    typeof latitudeB !== "number" ||
+    typeof longitudeB !== "number"
+  ) {
+    return null;
+  }
+
+  const latitudeDelta = (latitudeB - latitudeA) * DEG_TO_RAD;
+  const longitudeDelta = (longitudeB - longitudeA) * DEG_TO_RAD;
+  const latitudeARadians = latitudeA * DEG_TO_RAD;
+  const latitudeBRadians = latitudeB * DEG_TO_RAD;
+
+  const a =
+    Math.sin(latitudeDelta / 2) ** 2 +
+    Math.cos(latitudeARadians) *
+      Math.cos(latitudeBRadians) *
+      Math.sin(longitudeDelta / 2) ** 2;
+
+  return 2 * EARTH_RADIUS_KM * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
+function rankDiscoveryProfiles({
+  candidates,
+  discoveryInterests,
+  hasRequesterLocation,
+  requesterLatitude,
+  requesterLongitude,
+  distanceKm,
+}) {
+  const interestSet = new Set(discoveryInterests || []);
+  const distanceBoundaryActive = Boolean(distanceKm) && hasRequesterLocation;
+
+  return candidates
+    .map((candidate) => {
+      const candidateInterests = Array.isArray(candidate.interests)
+        ? candidate.interests
+        : [];
+      const sharedInterestCount = candidateInterests.reduce(
+        (count, interest) => count + (interestSet.has(interest) ? 1 : 0),
+        0
+      );
+      const hasSharedInterests = sharedInterestCount > 0;
+      const hasLocation =
+        typeof candidate.location?.latitude === "number" &&
+        typeof candidate.location?.longitude === "number";
+      const candidateDistanceKm = hasRequesterLocation
+        ? calculateDistanceKm(
+            requesterLatitude,
+            requesterLongitude,
+            candidate.location?.latitude,
+            candidate.location?.longitude
+          )
+        : null;
+      const withinDistance = distanceBoundaryActive
+        ? candidateDistanceKm !== null && candidateDistanceKm <= distanceKm
+        : false;
+
+      let discoveryBucket = 3;
+      if (hasSharedInterests && (!distanceBoundaryActive || withinDistance)) {
+        discoveryBucket = 0;
+      } else if (hasSharedInterests) {
+        discoveryBucket = 1;
+      } else if (distanceBoundaryActive && withinDistance) {
+        discoveryBucket = 2;
+      }
+
+      return {
+        ...candidate,
+        sharedInterestCount,
+        withinDistance,
+        distanceKm: candidateDistanceKm,
+        discoveryBucket,
+        discoveryScore:
+          (hasSharedInterests ? 1000 : 0) +
+          (withinDistance ? 100 : 0) +
+          Math.min(sharedInterestCount, 25) +
+          (hasLocation ? 10 : 0),
+      };
+    })
+    .sort((left, right) => {
+      if (left.discoveryBucket !== right.discoveryBucket) {
+        return left.discoveryBucket - right.discoveryBucket;
+      }
+
+      if (left.discoveryScore !== right.discoveryScore) {
+        return right.discoveryScore - left.discoveryScore;
+      }
+
+      if (left.sharedInterestCount !== right.sharedInterestCount) {
+        return right.sharedInterestCount - left.sharedInterestCount;
+      }
+
+      if (left.withinDistance !== right.withinDistance) {
+        return Number(right.withinDistance) - Number(left.withinDistance);
+      }
+
+      const updatedAtDifference =
+        new Date(right.updatedAt || 0).getTime() -
+        new Date(left.updatedAt || 0).getTime();
+      if (updatedAtDifference !== 0) {
+        return updatedAtDifference;
+      }
+
+      return String(right._id).localeCompare(String(left._id));
+    });
 }
 
 async function executeDiscoveryQuery({
@@ -663,6 +797,9 @@ async function executeDiscoveryQuery({
   limit,
   excludeSwiped,
 }) {
+  const skip = (page - 1) * limit;
+  const targetCount = skip + limit + 1;
+  const blockedProfileIds = await getBlockedProfileIds(requester._id);
   const swipedUserIds =
     requester.swipedUserIds?.map((value) => value.toString()) || [];
   const requesterLatitude = requester.location?.latitude;
@@ -680,7 +817,6 @@ async function executeDiscoveryQuery({
           max: filters.ageRange.max + 2,
         }
       : null;
-  const targetCount = page * limit;
 
   const runDiscoveryVariant = async ({
     ageRange,
@@ -695,137 +831,37 @@ async function executeDiscoveryQuery({
       swipedUserIds,
       excludeSwiped,
       dobRange: buildDobRange(ageRange),
-      extraExcludedIds,
+      extraExcludedIds: [...extraExcludedIds, ...blockedProfileIds],
     });
 
-    const pipeline = [
-      { $match: baseMatch },
-      {
-        $addFields: {
-          sharedInterestCount: {
-            $size: {
-              $setIntersection: [
-                { $ifNull: ["$interests", []] },
-                discoveryInterests,
-              ],
-            },
-          },
-          hasLocation: {
-            $and: [
-              { $ne: ["$location.latitude", null] },
-              { $ne: ["$location.longitude", null] },
-            ],
-          },
-        },
-      },
-      {
-        $addFields: {
-          hasSharedInterests: { $gt: ["$sharedInterestCount", 0] },
-          distanceKm: hasRequesterLocation
-            ? buildDistanceKmExpression(requesterLatitude, requesterLongitude)
-            : null,
-        },
-      },
-    ];
-
     if (requireSharedInterests) {
-      pipeline.push({
-        $match: { hasSharedInterests: true },
-      });
+      baseMatch.interests = { $in: discoveryInterests };
     }
 
     if (enforceDistanceBoundary) {
-      pipeline.push({
-        $match: {
-          distanceKm: { $ne: null, $lte: filters.distanceKm },
+      baseMatch.locationGeo = {
+        $geoWithin: {
+          $centerSphere: [
+            [requesterLongitude, requesterLatitude],
+            filters.distanceKm / EARTH_RADIUS_KM,
+          ],
         },
-      });
+      };
     }
 
-    pipeline.push(
-      {
-        $addFields: {
-          withinDistance:
-            hasRequesterLocation && filters.distanceKm
-              ? {
-                  $and: [
-                    { $ne: ["$distanceKm", null] },
-                    { $lte: ["$distanceKm", filters.distanceKm] },
-                  ],
-                }
-              : false,
-        },
-      },
-      {
-        $addFields: {
-          discoveryBucket: {
-            $switch: {
-              branches: [
-                {
-                  case: {
-                    $and: [
-                      "$hasSharedInterests",
-                      {
-                        $cond: [
-                          hasRequesterLocation && Boolean(filters.distanceKm),
-                          "$withinDistance",
-                          true,
-                        ],
-                      },
-                    ],
-                  },
-                  then: 0,
-                },
-                {
-                  case: "$hasSharedInterests",
-                  then: 1,
-                },
-                {
-                  case:
-                    hasRequesterLocation && Boolean(filters.distanceKm)
-                      ? "$withinDistance"
-                      : false,
-                  then: 2,
-                },
-              ],
-              default: 3,
-            },
-          },
-          discoveryScore: {
-            $add: [
-              { $cond: ["$hasSharedInterests", 1000, 0] },
-              { $cond: ["$withinDistance", 100, 0] },
-              { $min: ["$sharedInterestCount", 25] },
-              { $cond: ["$hasLocation", 10, 0] },
-            ],
-          },
-        },
-      },
-      {
-        $sort: {
-          discoveryBucket: 1,
-          discoveryScore: -1,
-          sharedInterestCount: -1,
-          withinDistance: -1,
-          updatedAt: -1,
-          _id: -1,
-        },
-      },
-      {
-        $facet: {
-          metadata: [{ $count: "total" }],
-          data: [{ $limit: fetchLimit }],
-        },
-      },
-    );
-
-    const [result] = await UserProfile.aggregate(pipeline);
-    const total = result?.metadata?.[0]?.total || 0;
-    const profiles = result?.data || [];
-
     return {
-      profiles,
-      total,
+      profiles: rankDiscoveryProfiles({
+        candidates: await UserProfile.find(baseMatch)
+          .select(DISCOVERY_PROFILE_SELECT)
+          .sort({ updatedAt: -1, _id: -1 })
+          .limit(fetchLimit)
+          .lean(),
+        discoveryInterests,
+        hasRequesterLocation,
+        requesterLatitude,
+        requesterLongitude,
+        distanceKm: filters.distanceKm,
+      }),
     };
   };
 
@@ -905,8 +941,8 @@ async function executeDiscoveryQuery({
 
   const combinedProfiles = [];
   const addedIds = new Set();
-  let totalAvailable = 0;
   const tried = new Set();
+  const fetchLimit = buildDiscoveryCandidateLimit(targetCount);
 
   for (const variant of variants) {
     const variantKey = JSON.stringify(variant);
@@ -916,10 +952,8 @@ async function executeDiscoveryQuery({
     const result = await runDiscoveryVariant({
       ...variant,
       extraExcludedIds: Array.from(addedIds),
-      fetchLimit: targetCount,
+      fetchLimit,
     });
-
-    totalAvailable += result.total;
 
     for (const profile of result.profiles) {
       const profileId = profile?._id?.toString();
@@ -933,15 +967,15 @@ async function executeDiscoveryQuery({
     }
   }
 
-  const skip = (page - 1) * limit;
   const pagedProfiles = combinedProfiles.slice(skip, skip + limit);
+  const hasMore = combinedProfiles.length > skip + pagedProfiles.length;
 
   return {
     profiles: pagedProfiles,
-    total: totalAvailable,
+    total: combinedProfiles.length,
     page,
     limit,
-    hasMore: totalAvailable > skip + pagedProfiles.length,
+    hasMore,
   };
 }
 
@@ -1155,7 +1189,10 @@ export const handleSwipe = async (req, res) => {
 
         console.log("Chat pairKey:", pairKey);
 
-        let chat = await Chat.findOne({ pairKey });
+        let chat = await Chat.findOne({
+          pairKey,
+          status: { $in: ["pending", "accepted"] },
+        });
 
         if (!chat) {
           console.log("Creating NEW chat for match");
@@ -1163,12 +1200,15 @@ export const handleSwipe = async (req, res) => {
             senderId: loggedInUserId,
             receiverId: swipedUserId,
             status: "accepted",
-            messages: [],
             pairKey,
+            participants: [loggedInUserId, swipedUserId],
+            lastActivityAt: new Date(),
           });
         } else {
           console.log("Reusing EXISTING chat");
           chat.status = "accepted";
+          chat.participants = [loggedInUserId, swipedUserId];
+          chat.lastActivityAt = new Date();
         }
 
         // Twilio channel creation

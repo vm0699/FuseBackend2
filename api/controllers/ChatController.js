@@ -1,4 +1,5 @@
 import Chat from "../models/ChatModel.js";
+import Message from "../models/MessageModel.js";
 import UserProfile from "../models/UserProfile.js";
 import GiftOrder from "../models/GiftOrder.js";
 import GiftIntent from "../models/GiftIntentModel.js";
@@ -7,6 +8,7 @@ import client from "../config/twilio.js";
 import dotenv from "dotenv";
 import twilio from "twilio";
 import notificationService from "../services/notificationService.js";
+import { ensureChatTwilioChannel } from "../services/chatTwilioService.js";
 import { NOTIFICATION_TYPES } from "../services/notifications/notificationTypes.js";
 
 dotenv.config();
@@ -133,46 +135,6 @@ const mapGiftIntentForResponse = async (intent, currentUserId) => {
 };
 
 
-const ensureTwilioChannel = async (chat, userA, userB) => {
-  const channelSid = chat.twilioChannelSid || chat.twilioChatChannelSid;
-
-  const service = client.chat.v2.services(process.env.TWILIO_CHAT_SERVICE_SID);
-  let channel = null;
-
-  if (channelSid) {
-    try {
-      channel = await service.channels(channelSid).fetch();
-    } catch (err) {
-      // If fetch fails, we'll recreate below
-      channel = null;
-    }
-  }
-
-  if (!channel) {
-    const friendlyName = `${userA}-${userB}`;
-    const uniqueName = `chat-${normalizePairKey(userA, userB)}`;
-    const created = await service.channels.create({ friendlyName, uniqueName });
-    channel = await service.channels(created.sid).fetch();
-
-    chat.twilioChannelSid = created.sid;
-    chat.twilioChatChannelSid = chat.twilioChatChannelSid || created.sid;
-    await chat.save();
-  }
-
-  // Ensure both participants are members
-  const members = await service.channels(chat.twilioChannelSid || chat.twilioChatChannelSid).members.list();
-  const memberIds = members.map((m) => m.identity);
-  const idsToAdd = [];
-  if (!memberIds.includes(userA.toString())) idsToAdd.push(userA);
-  if (!memberIds.includes(userB.toString())) idsToAdd.push(userB);
-
-  for (const id of idsToAdd) {
-    await service.channels(chat.twilioChannelSid || chat.twilioChatChannelSid).members.create({ identity: id.toString() });
-  }
-
-  return chat.twilioChannelSid || chat.twilioChatChannelSid;
-};
-
 const ensureParticipantIds = (chat, userAId, userBId) => {
   const existing = Array.isArray(chat.participants) ? chat.participants : [];
   const merged = [...existing];
@@ -187,28 +149,160 @@ const ensureParticipantIds = (chat, userAId, userBId) => {
   chat.participants = merged;
 };
 
+const normalizeMessageTimestamp = (value) => {
+  const date = value ? new Date(value) : null;
+  return Number.isNaN(date?.getTime?.()) ? new Date() : date;
+};
+
+const mapStoredMessageToResponse = (messageDoc, fallbackId = null) => ({
+  id:
+    messageDoc?._id?.toString?.() ||
+    messageDoc?.id?.toString?.() ||
+    fallbackId,
+  authorId: messageDoc?.sender?.toString?.() || messageDoc?.sender || null,
+  body: messageDoc?.message || "",
+  timestamp: normalizeMessageTimestamp(messageDoc?.timestamp),
+});
+
+const getLegacyMessages = (chat) =>
+  Array.isArray(chat?.messages) ? chat.messages : [];
+
+const getLastLegacyMessage = (chat) => {
+  const legacyMessages = getLegacyMessages(chat);
+  return legacyMessages.length ? legacyMessages[legacyMessages.length - 1] : null;
+};
+
+const getChatPreviewMessage = (chat) => {
+  if (chat?.lastMessageSummary && chat?.lastMessageAt) {
+    return {
+      sender: chat.lastMessageSenderId || null,
+      message: chat.lastMessageSummary,
+      timestamp: chat.lastMessageAt,
+    };
+  }
+
+  const legacyLastMessage = getLastLegacyMessage(chat);
+  return legacyLastMessage
+    ? {
+        sender: legacyLastMessage.sender || null,
+        message: legacyLastMessage.message,
+        timestamp: legacyLastMessage.timestamp,
+      }
+    : null;
+};
+
+const applyLastMessageMetadata = (chat, { senderId, message, timestamp }) => {
+  const normalizedTimestamp = normalizeMessageTimestamp(timestamp);
+  chat.lastMessageSummary = message;
+  chat.lastMessageAt = normalizedTimestamp;
+  chat.lastMessageSenderId = senderId || null;
+  chat.lastActivityAt = normalizedTimestamp;
+};
+
+const clearLastMessageMetadata = (chat) => {
+  chat.lastMessageSummary = null;
+  chat.lastMessageAt = null;
+  chat.lastMessageSenderId = null;
+  chat.lastActivityAt = new Date();
+};
+
+const getStoredAndLegacyMessages = async (chatId, chat) => {
+  const storedMessages = await Message.find({ chatId })
+    .sort({ timestamp: 1, _id: 1 })
+    .lean();
+
+  const normalizedStoredMessages = storedMessages.map((messageDoc) =>
+    mapStoredMessageToResponse(messageDoc)
+  );
+
+  const normalizedLegacyMessages = getLegacyMessages(chat)
+    .map((messageDoc, index) =>
+      mapStoredMessageToResponse(
+        messageDoc,
+        `${chatId.toString()}_legacy_${index}`
+      )
+    )
+    .sort(
+      (left, right) =>
+        new Date(left.timestamp).getTime() - new Date(right.timestamp).getTime()
+    );
+
+  const mergedMessages = [...normalizedLegacyMessages, ...normalizedStoredMessages].sort(
+    (left, right) => {
+      const timestampDiff =
+        new Date(left.timestamp).getTime() - new Date(right.timestamp).getTime();
+      if (timestampDiff !== 0) return timestampDiff;
+      return String(left.id).localeCompare(String(right.id));
+    }
+  );
+
+  return mergedMessages;
+};
+
+const hasRecentLegacyDuplicate = ({
+  chat,
+  senderId,
+  message,
+  windowMs,
+}) => {
+  const threshold = Date.now() - windowMs;
+
+  return getLegacyMessages(chat)
+    .slice(-10)
+    .some((legacyMessage) => {
+      const sameSender =
+        legacyMessage?.sender?.toString?.() === senderId.toString();
+      const sameText = legacyMessage?.message === message;
+      const timestamp = legacyMessage?.timestamp
+        ? new Date(legacyMessage.timestamp).getTime()
+        : 0;
+
+      return sameSender && sameText && timestamp >= threshold;
+    });
+};
+
 const appendComplimentMessage = async ({ chat, senderId, compliment }) => {
   const trimmed = (compliment || "").trim();
   if (!trimmed) return null;
 
-  const now = Date.now();
-  const recentDuplicate = (chat.messages || [])
-    .slice(-5)
-    .find(
-      (m) =>
-        m.sender?.toString() === senderId.toString() &&
-        m.message === trimmed &&
-        Math.abs(now - new Date(m.timestamp).getTime()) < 5 * 60 * 1000
-    );
+  const duplicateThreshold = new Date(Date.now() - 5 * 60 * 1000);
+  const recentDuplicate =
+    (await Message.findOne({
+      chatId: chat._id,
+      sender: senderId,
+      message: trimmed,
+      timestamp: { $gte: duplicateThreshold },
+    })
+      .sort({ timestamp: -1, _id: -1 })
+      .lean()) ||
+    (hasRecentLegacyDuplicate({
+      chat,
+      senderId,
+      message: trimmed,
+      windowMs: 5 * 60 * 1000,
+    })
+      ? { message: trimmed }
+      : null);
 
   if (!recentDuplicate) {
-    chat.messages.push({ sender: senderId, message: trimmed, timestamp: new Date() });
+    const timestamp = new Date();
     if (chat.twilioChannelSid || chat.twilioChatChannelSid) {
       await client.chat
         .services(process.env.TWILIO_CHAT_SERVICE_SID)
         .channels(chat.twilioChannelSid || chat.twilioChatChannelSid)
         .messages.create({ from: senderId.toString(), body: trimmed });
     }
+    await Message.create({
+      chatId: chat._id,
+      sender: senderId,
+      message: trimmed,
+      timestamp,
+    });
+    applyLastMessageMetadata(chat, {
+      senderId,
+      message: trimmed,
+      timestamp,
+    });
     return trimmed;
   }
 
@@ -254,7 +348,11 @@ export const sendCompliment = async (req, res) => {
     let chat = await Chat.findOne({
       pairKey,
       status: { $in: ["pending", "accepted"] },
-    });
+    })
+      .select(
+        "senderId receiverId pairKey status participants twilioChatChannelSid twilioChannelSid twilioMembersInitialized lastMessageSummary lastMessageAt lastMessageSenderId lastActivityAt messages"
+      )
+      .slice("messages", -5);
 
     if (chat) {
       console.log("🟣 [PHASE 1] Reusing ACTIVE chat:", chat._id.toString());
@@ -268,7 +366,6 @@ export const sendCompliment = async (req, res) => {
         receiverId: swipedUserId,
         pairKey,
         status: "pending",
-        messages: [],
         participants: [senderId, swipedUserId],
       });
     }
@@ -276,7 +373,11 @@ export const sendCompliment = async (req, res) => {
     chat.pairKey = pairKey;
     ensureParticipantIds(chat, senderId, swipedUserId);
 
-    const channelSid = await ensureTwilioChannel(chat, senderId, swipedUserId);
+    const channelSid = await ensureChatTwilioChannel({
+      chat,
+      userAId: senderId,
+      userBId: swipedUserId,
+    });
 
     const complimentPreview = await appendComplimentMessage({
       chat,
@@ -334,7 +435,13 @@ export const getUserChats = async (req, res) => {
     const chats = await Chat.find({
       $or: [{ senderId: userId }, { receiverId: userId }],
       status: { $in: ["accepted", "pending"] },
-    }).populate("receiverId senderId");
+    })
+      .sort({ lastActivityAt: -1, updatedAt: -1, _id: -1 })
+      .select(
+        "senderId receiverId twilioChatChannelSid twilioChannelSid status lastMessageSummary lastMessageAt lastMessageSenderId lastActivityAt messages"
+      )
+      .slice("messages", -1)
+      .populate("receiverId senderId");
 
     const formatted = (chats || [])
       .map((chat) => {
@@ -345,7 +452,7 @@ export const getUserChats = async (req, res) => {
           return null;
         }
 
-        const lastMsg = chat.messages?.length ? chat.messages[chat.messages.length - 1] : null;
+        const lastMsg = getChatPreviewMessage(chat);
 
         return {
           _id: chat._id,
@@ -386,7 +493,9 @@ export const handleChatRequest = async (req, res) => {
       userId,
     });
 
-    const chat = await Chat.findById(chatId).populate("senderId receiverId");
+    const chat = await Chat.findById(chatId)
+      .slice("messages", -1)
+      .populate("senderId receiverId");
     if (!chat) {
       return res.status(404).json({ success: false, message: "Chat not found" });
     }
@@ -414,10 +523,7 @@ export const handleChatRequest = async (req, res) => {
     const otherUser =
       senderIdStr === userId?.toString() ? chat.receiverId : chat.senderId;
 
-    const complimentPreview =
-      chat.messages && chat.messages.length
-        ? chat.messages[chat.messages.length - 1].message
-        : null;
+    const complimentPreview = getChatPreviewMessage(chat)?.message || null;
 
     chat.pairKey =
       chat.pairKey || normalizePairKey(senderIdStr, receiverIdStr);
@@ -435,16 +541,17 @@ export const handleChatRequest = async (req, res) => {
 
       if (!alreadyAccepted) {
         chat.status = "accepted";
+        chat.lastActivityAt = new Date();
         ensureParticipantIds(
           chat,
           chat.senderId?._id || chat.senderId,
           chat.receiverId?._id || chat.receiverId
         );
-        await ensureTwilioChannel(
+        await ensureChatTwilioChannel({
           chat,
-          chat.senderId?._id || chat.senderId,
-          chat.receiverId?._id || chat.receiverId
-        );
+          userAId: chat.senderId?._id || chat.senderId,
+          userBId: chat.receiverId?._id || chat.receiverId,
+        });
         await chat.save();
       }
 
@@ -493,6 +600,7 @@ export const handleChatRequest = async (req, res) => {
 
       if (!alreadyRejected) {
         chat.status = "rejected";
+        chat.lastActivityAt = new Date();
         await chat.save();
       }
 
@@ -636,10 +744,13 @@ export const closeChat = async (req, res) => {
     }
 
     // 🔹 ADDITION: delete message history
-    const deletedMessageCount = chat.messages?.length || 0;
+    const storedMessageCount = await Message.countDocuments({ chatId: chat._id });
+    const deletedMessageCount = storedMessageCount + (chat.messages?.length || 0);
+    await Message.deleteMany({ chatId: chat._id });
     chat.messages = [];
 
     chat.status = "closed";
+    clearLastMessageMetadata(chat);
     await chat.save();
 
     console.log("🟣 [PHASE 1] Chat closed and history cleared", {
@@ -713,15 +824,7 @@ export const getChatMessages = async (req, res) => {
       });
     }
 
-    // Normalize messages for frontend UI
-    const messages = (chat.messages || [])
-      .sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp))
-      .map((m, index) => ({
-        id: `${chat._id.toString()}_${index}`,
-        authorId: m.sender?.toString() || null,
-        body: m.message,
-        timestamp: m.timestamp,
-      }));
+    const messages = await getStoredAndLegacyMessages(chat._id, chat);
 
     console.log("🟣 [PHASE 2] Messages fetched from DB", {
       chatId: chat._id.toString(),
@@ -771,7 +874,11 @@ export const saveChatMessage = async (req, res) => {
       return res.status(400).json({ success: false, message: "Message cannot be empty" });
     }
 
-    const chat = await Chat.findById(chatId);
+    const chat = await Chat.findById(chatId)
+      .select(
+        "senderId receiverId pairKey status participants twilioChatChannelSid twilioChannelSid lastMessageSummary lastMessageAt lastMessageSenderId lastActivityAt messages"
+      )
+      .slice("messages", -10);
     if (!chat) {
       return res.status(404).json({ success: false, message: "Chat not found" });
     }
@@ -801,13 +908,24 @@ export const saveChatMessage = async (req, res) => {
     }
 
     // 🔒 Dedupe: same sender + same message within last 30 seconds
-    const now = Date.now();
-    const recent = (chat.messages || []).slice(-10).find((m) => {
-      const sameSender = m.sender?.toString() === userId.toString();
-      const sameText = m.message === trimmed;
-      const t = m.timestamp ? new Date(m.timestamp).getTime() : 0;
-      return sameSender && sameText && Math.abs(now - t) < 30 * 1000;
-    });
+    const duplicateThreshold = new Date(Date.now() - 30 * 1000);
+    const recent =
+      (await Message.findOne({
+        chatId: chat._id,
+        sender: userId,
+        message: trimmed,
+        timestamp: { $gte: duplicateThreshold },
+      })
+        .sort({ timestamp: -1, _id: -1 })
+        .lean()) ||
+      (hasRecentLegacyDuplicate({
+        chat,
+        senderId: userId,
+        message: trimmed,
+        windowMs: 30 * 1000,
+      })
+        ? { message: trimmed }
+        : null);
 
     if (recent) {
       console.log("🟣 [PHASE 3] Duplicate prevented", {
@@ -817,20 +935,25 @@ export const saveChatMessage = async (req, res) => {
       return res.status(200).json({ success: true, duplicated: true });
     }
 
-    chat.messages.push({
+    const lastMessage = await Message.create({
+      chatId: chat._id,
       sender: userId,
       message: trimmed,
       timestamp: new Date(),
     });
 
+    applyLastMessageMetadata(chat, {
+      senderId: userId,
+      message: trimmed,
+      timestamp: lastMessage.timestamp,
+    });
     await chat.save();
 
     console.log("🟣 [PHASE 3] Message saved to DB", {
       chatId: chat._id.toString(),
-      totalMessages: chat.messages.length,
+      messageId: lastMessage?._id?.toString?.() || lastMessage?._id,
     });
 
-    const lastMessage = chat.messages?.[chat.messages.length - 1];
     const recipientId =
       senderIdStr === userId.toString() ? receiverIdStr : senderIdStr;
 
@@ -900,7 +1023,11 @@ export const createGiftIntent = async (req, res) => {
     }
 
     // 🔒 Interaction threshold (both must have chatted)
-    const uniqueSenders = new Set(chat.messages.map((m) => m.sender?.toString()));
+    const storedSenders = await Message.distinct("sender", { chatId: chat._id });
+    const uniqueSenders = new Set([
+      ...storedSenders.map((sender) => sender?.toString?.() || String(sender)),
+      ...getLegacyMessages(chat).map((legacyMessage) => legacyMessage?.sender?.toString?.()),
+    ].filter(Boolean));
     if (uniqueSenders.size < 2) {
       return res.status(400).json({
         success: false,

@@ -2,7 +2,6 @@ import mongoose from "mongoose";
 
 const ChatSchema = new mongoose.Schema(
   {
-    // Existing fields — DO NOT CHANGE
     senderId: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "UserProfile",
@@ -13,21 +12,39 @@ const ChatSchema = new mongoose.Schema(
       ref: "UserProfile",
       required: true,
     },
-
     twilioChatChannelSid: {
       type: String,
-      unique: true, // Existing SID reference
+      unique: true,
     },
     twilioChannelSid: {
-      type: String, // Optional alias for channel SID
+      type: String,
     },
-
+    twilioMembersInitialized: {
+      type: Boolean,
+      default: false,
+    },
     pairKey: {
-      type: String, // normalized "userA|userB"
+      type: String,
       required: true,
     },
-
-    // Existing message storage (kept as-is)
+    lastMessageSummary: {
+      type: String,
+      default: null,
+    },
+    lastMessageAt: {
+      type: Date,
+      default: null,
+    },
+    lastMessageSenderId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "UserProfile",
+      default: null,
+    },
+    lastActivityAt: {
+      type: Date,
+      default: Date.now,
+    },
+    // Legacy embedded storage is kept only as a migration-safe fallback.
     messages: [
       {
         sender: {
@@ -44,16 +61,11 @@ const ChatSchema = new mongoose.Schema(
         },
       },
     ],
-
-    // Existing + extended lifecycle
     status: {
       type: String,
       enum: ["pending", "accepted", "rejected", "closed"],
       default: "pending",
     },
-
-    // 🔹 ADDITION (non-breaking)
-    // Neutral participants array for accepted chats & future logic
     participants: [
       {
         type: mongoose.Schema.Types.ObjectId,
@@ -62,21 +74,10 @@ const ChatSchema = new mongoose.Schema(
     ],
   },
   {
-    // 🔹 ADDITION (non-breaking)
-    // Needed for chat list ordering, debugging, lifecycle tracking
-    timestamps: true, // createdAt, updatedAt
+    timestamps: true,
   }
 );
 
-/**
- * IMPORTANT INDEX (already conceptually present, now enforced clearly)
- *
- * This ensures:
- * - Only ONE active chat per pairKey when status is pending or accepted
- * - Allows NEW chat creation when last chat is rejected or closed
- *
- * Controllers must handle reuse logic carefully.
- */
 ChatSchema.index(
   { pairKey: 1 },
   {
@@ -86,5 +87,9 @@ ChatSchema.index(
     },
   }
 );
+
+ChatSchema.index({ senderId: 1, status: 1, lastActivityAt: -1, _id: -1 });
+ChatSchema.index({ receiverId: 1, status: 1, lastActivityAt: -1, _id: -1 });
+ChatSchema.index({ pairKey: 1 });
 
 export default mongoose.model("Chat", ChatSchema);
