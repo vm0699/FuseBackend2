@@ -25,7 +25,12 @@ const profileSchema = new Schema(
 
     // ===== BASIC PROFILE =====
     name: { type: String, default: "" },
-    username: { type: String, default: "" },
+    username: {
+      type: String,
+      default: null,
+      trim: true,
+      lowercase: true,
+    },
     dateOfBirth: { type: String, default: "" },
     gender: { type: String, default: "" },
     height: { type: String, default: "" },
@@ -144,6 +149,15 @@ profileSchema.pre("save", function syncLocationGeo(next) {
 });
 
 profileSchema.index({ locationGeo: "2dsphere" });
+profileSchema.index(
+  { username: 1 },
+  {
+    unique: true,
+    partialFilterExpression: {
+      username: { $type: "string", $ne: "" },
+    },
+  }
+);
 profileSchema.index({ onboardingStage: 1, gender: 1, dateOfBirth: 1, updatedAt: -1 });
 profileSchema.index({ onboardingStage: 1, updatedAt: -1 });
 profileSchema.index({ gender: 1, updatedAt: -1 });

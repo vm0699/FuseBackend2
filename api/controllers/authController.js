@@ -87,6 +87,7 @@ export const verifyPhoneNumber = async (req, res) => {
     const newUser = await UserProfile.create({
       phoneNumber: formattedPhone,
       onboardingStage: "PHONE_VERIFIED",
+      username: null,
     });
 
     console.log("🆕 [verifyPhoneNumber] New user created:", {

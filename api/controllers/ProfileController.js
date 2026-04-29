@@ -8,6 +8,12 @@ import fs from 'fs';
 import path from 'path';
 import jwt from 'jsonwebtoken';
 
+function normalizeUsernameInput(value) {
+  if (typeof value !== "string") return null;
+  const normalized = value.trim().toLowerCase();
+  return normalized.length > 0 ? normalized : null;
+}
+
 const s3ClientConfig = {
   region: process.env.AWS_REGION,
 };
@@ -242,7 +248,12 @@ if (intro?.name) existingUser.name = intro.name;
 if (intro?.dob) existingUser.dateOfBirth = intro.dob;
 
 // options
-if (options?.username) existingUser.username = options.username;
+if (typeof options?.username !== "undefined") {
+  const normalizedUsername = normalizeUsernameInput(options.username);
+  if (normalizedUsername) {
+    existingUser.username = normalizedUsername;
+  }
+}
 if (options?.gender) existingUser.gender = options.gender;
 
 // profileDetails
@@ -1859,6 +1870,14 @@ export const updateUserProfile = async (req, res) => {
   }
   // ================================
 
+      if (key === "username") {
+        value = normalizeUsernameInput(value);
+        if (!value) {
+          console.log("⚠️ [updateUserProfile] Ignoring empty username update");
+          continue;
+        }
+      }
+
       if (key === "onboardingStage") {
         if (!ALLOWED_ONBOARDING_STAGES.includes(value)) {
           console.log(
@@ -1997,6 +2016,17 @@ export const updateUserProfile = async (req, res) => {
     });
   } catch (error) {
     console.error("🔥 [updateUserProfile] ERROR:", error);
+
+    if (
+      error?.code === 11000 &&
+      (error?.keyPattern?.username === 1 || error?.keyValue?.username)
+    ) {
+      return res.status(409).json({
+        success: false,
+        message: "Username already taken.",
+      });
+    }
+
     return res.status(500).json({
       success: false,
       message: "Internal server error while updating profile.",
