@@ -1,5 +1,13 @@
 import mongoose from "mongoose";
 
+/**
+ * GiftPayment — Phase 2 MVP
+ *
+ * Sender-paid only. `mode` controls whether this is a dev PLACEHOLDER payment
+ * or a real RAZORPAY payment (driven by GIFT_PAYMENT_MODE). `idempotencyKey`
+ * guarantees a retry/double-tap can never create a second payment for the same
+ * intent attempt.
+ */
 const GiftPaymentSchema = new mongoose.Schema(
   {
     giftIntentId: {
@@ -17,6 +25,7 @@ const GiftPaymentSchema = new mongoose.Schema(
     role: {
       type: String,
       enum: ["SENDER", "RECIPIENT"],
+      default: "SENDER",
       required: true,
     },
 
@@ -30,10 +39,16 @@ const GiftPaymentSchema = new mongoose.Schema(
       default: "INR",
     },
 
-    // Payment gateway info (Razorpay or whatever you plug in later)
+    // PLACEHOLDER (dev) or RAZORPAY (real). Set from GIFT_PAYMENT_MODE.
+    mode: {
+      type: String,
+      enum: ["PLACEHOLDER", "RAZORPAY"],
+      default: "PLACEHOLDER",
+    },
+
     provider: {
       type: String,
-      default: "RAZORPAY", // can change later if needed
+      default: "RAZORPAY",
     },
 
     providerOrderId: {
@@ -44,11 +59,20 @@ const GiftPaymentSchema = new mongoose.Schema(
       type: String,
     },
 
+    // Idempotency guard: unique per payment attempt. A retry reuses the record.
+    idempotencyKey: {
+      type: String,
+      unique: true,
+      sparse: true,
+    },
+
     status: {
       type: String,
       enum: ["INITIATED", "PAID", "FAILED", "REFUNDED"],
       default: "INITIATED",
     },
+
+    verifiedAt: Date,
 
     failureReason: {
       type: String,
@@ -60,5 +84,7 @@ const GiftPaymentSchema = new mongoose.Schema(
   },
   { timestamps: true }
 );
+
+GiftPaymentSchema.index({ giftIntentId: 1, status: 1 });
 
 export default mongoose.model("GiftPayment", GiftPaymentSchema);

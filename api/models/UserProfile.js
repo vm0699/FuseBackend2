@@ -7,6 +7,17 @@ const profileSchema = new Schema(
     // ===== CORE IDENTITY =====
     phoneNumber: { type: String, required: true, unique: true },
 
+    // Optional secondary login identity — linked to an existing phone account
+    // via Settings, used only for the "log in with email" OTP shortcut.
+    email: {
+      type: String,
+      default: null,
+      trim: true,
+      lowercase: true,
+      sparse: true,
+      unique: true,
+    },
+
     // ===== ONBOARDING CHECKPOINT TRACKER (2.1 CORE) =====
     onboardingStage: {
       type: String,
@@ -104,6 +115,36 @@ const profileSchema = new Schema(
     marijuana: { type: String, default: "" },
     drugs: { type: String, default: "" },
 
+    // ===== SAFETY / COMMERCE PREFERENCES =====
+    safetyPreferences: {
+      allowGifts: { type: Boolean, default: true },
+      allowDateInvites: { type: Boolean, default: true },
+    },
+
+    // ===== DISCOVERY PREFERENCES =====
+    preferredGender: { type: [String], default: [] },
+
+    // Throttled timestamp of last authenticated activity — used for discovery ranking
+    lastActiveAt: { type: Date, default: null },
+
+    // Persisted filter preferences — saved from FilterScreen, synced across devices
+    discoveryPreferences: {
+      ageRange: {
+        min: { type: Number, default: 18 },
+        max: { type: Number, default: 45 },
+      },
+      ageFlex: { type: Boolean, default: true },
+      distanceKm: { type: Number, default: 50 },
+      distanceFlex: { type: Boolean, default: true },
+      interests: { type: [String], default: [] },
+      datingIntentions: { type: [String], default: [] },
+      religion: { type: [String], default: [] },
+      ethnicity: { type: [String], default: [] },
+      drinking: { type: [String], default: [] },
+      smoking: { type: [String], default: [] },
+      activeOnly: { type: Boolean, default: false },
+    },
+
     // ===== MATCHING & SWIPE TRACKING =====
     swipedUserIds: {
       type: [mongoose.Schema.Types.ObjectId],
@@ -162,6 +203,9 @@ profileSchema.index({ onboardingStage: 1, gender: 1, dateOfBirth: 1, updatedAt: 
 profileSchema.index({ onboardingStage: 1, updatedAt: -1 });
 profileSchema.index({ gender: 1, updatedAt: -1 });
 profileSchema.index({ gender: 1, dateOfBirth: 1, updatedAt: -1 });
+// Discovery ranking indices
+profileSchema.index({ lastActiveAt: -1, gender: 1 });
+profileSchema.index({ interests: 1 });
 
 const UserProfile = model("UserProfile", profileSchema);
 

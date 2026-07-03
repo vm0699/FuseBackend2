@@ -56,14 +56,22 @@ const authMiddleware = async (req, res, next) => {
     req.user = {
       id: user._id.toString(),
       phoneNumber: user.phoneNumber,
-      username: user.username || "", // ✅ onboarding-safe
+      username: user.username || "",
       name: user.name || "",
       gender: user.gender || "",
       interests: user.interests || [],
     };
 
-    console.log("✅ Authenticated user:", req.user);
-    console.log("🔑 [DEBUG] Passing to next middleware or route");
+    // Update lastActiveAt at most once per hour — fire and forget
+    const ACTIVE_UPDATE_THRESHOLD_MS = 60 * 60 * 1000;
+    const lastActive = user.lastActiveAt;
+    if (!lastActive || Date.now() - new Date(lastActive).getTime() > ACTIVE_UPDATE_THRESHOLD_MS) {
+      UserProfile.updateOne(
+        { _id: user._id },
+        { $set: { lastActiveAt: new Date() } }
+      ).catch(() => {});
+    }
+
     next();
   } catch (error) {
     console.error("❌ Auth Middleware Error:", error);

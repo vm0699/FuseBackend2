@@ -3,9 +3,11 @@ import {
   saveUserProfile,
   getProfileByPhoneNumber,
   getFilteredProfiles,
+  getDiscoveryPreferences,
   updateUserProfile,
   reorderPhotos,
   deletePhoto,
+  addEmail,
 } from '../controllers/ProfileController.js';
 import { uploadPhotos } from '../controllers/ProfilePhotoController.js';
 import { handleSwipe } from '../controllers/SwipeController.js';
@@ -43,8 +45,11 @@ router.get('/filteredProfiles', authMiddleware, getFilteredProfiles);
 router.post('/filteredProfiles', authMiddleware, getFilteredProfiles);
 
 router.post('/swipe', authMiddleware, handleSwipe);
+router.get('/discovery-preferences', authMiddleware, getDiscoveryPreferences);
 
 router.put("/reorder-photos", authMiddleware, reorderPhotos);
 router.delete("/delete-photo", authMiddleware, deletePhoto);
+
+router.post("/add-email", authMiddleware, addEmail);
 
 export default router;

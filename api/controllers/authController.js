@@ -2,6 +2,10 @@ import UserProfile from "../models/UserProfile.js";
 import jwt from "jsonwebtoken";
 import dotenv from "dotenv";
 import { sendOTP, verifyOTP } from "../middleware/otpService.js";
+import {
+  sendEmailOTP as sendEmailOTPCode,
+  verifyEmailOTP as verifyEmailOTPCode,
+} from "../middleware/emailOtpService.js";
 
 dotenv.config();
 
@@ -237,6 +241,135 @@ export const verifyCode = async (req, res) => {
   }
 };
 
+
+/**
+ * EMAIL LOGIN — STEP 1 — SEND OTP
+ * Email must already be linked to an existing phone-verified account
+ * (added via Settings). This is a login shortcut, not a signup path.
+ */
+export const sendEmailOTPHandler = async (req, res) => {
+  const { email } = req.body;
+
+  console.log("📧 [sendEmailOTP] Incoming email:", email);
+
+  if (!email || typeof email !== "string") {
+    return res.status(400).json({
+      success: false,
+      message: "Email is required.",
+    });
+  }
+
+  try {
+    const normalizedEmail = email.trim().toLowerCase();
+
+    const user = await UserProfile.findOne({ email: normalizedEmail });
+
+    if (!user) {
+      console.log("❌ [sendEmailOTP] No account linked to this email");
+      return res.status(404).json({
+        success: false,
+        message:
+          "No account found with this email. Please continue with your phone number instead.",
+      });
+    }
+
+    await sendEmailOTPCode(normalizedEmail);
+    console.log("✅ [sendEmailOTP] OTP emailed to:", normalizedEmail);
+
+    return res.status(200).json({
+      success: true,
+      message: "OTP sent.",
+    });
+  } catch (error) {
+    console.error("🔥 [sendEmailOTP] ERROR:", error);
+    return res.status(500).json({
+      success: false,
+      message: error.message || "Failed to send email OTP.",
+    });
+  }
+};
+
+/**
+ * EMAIL LOGIN — STEP 2 — VERIFY OTP (FINAL AUTH POINT)
+ */
+export const verifyEmailOTPHandler = async (req, res) => {
+  const { email, code } = req.body;
+
+  console.log("🔐 [verifyEmailOTP] Incoming:", { email, code });
+
+  if (!email || !code) {
+    return res.status(400).json({
+      success: false,
+      message: "Email and OTP code are required.",
+    });
+  }
+
+  try {
+    const normalizedEmail = email.trim().toLowerCase();
+
+    const verified = await verifyEmailOTPCode(normalizedEmail, code);
+    console.log("🔐 [verifyEmailOTP] OTP verified:", verified);
+
+    if (!verified) {
+      return res.status(401).json({
+        success: false,
+        message: "Invalid or expired OTP.",
+      });
+    }
+
+    const user = await UserProfile.findOne({ email: normalizedEmail });
+
+    if (!user) {
+      console.log("❌ [verifyEmailOTP] User not found after OTP");
+      return res.status(404).json({
+        success: false,
+        message: "User not found.",
+      });
+    }
+
+    const accessToken = jwt.sign(
+      {
+        id: user._id.toString(),
+        phoneNumber: user.phoneNumber,
+        username: user.username || "",
+      },
+      process.env.JWT_SECRET,
+      { expiresIn: "1h" }
+    );
+
+    const refreshToken = jwt.sign(
+      {
+        id: user._id.toString(),
+        phoneNumber: user.phoneNumber,
+        username: user.username || "",
+      },
+      process.env.JWT_REFRESH_SECRET,
+      { expiresIn: "7d" }
+    );
+
+    console.log("🔑 [verifyEmailOTP] Tokens issued");
+
+    return res.status(200).json({
+      success: true,
+      message: "OTP verified successfully.",
+      data: {
+        onboardingStage: user.onboardingStage,
+        accessToken,
+        refreshToken,
+        user: {
+          id: user._id.toString(),
+          username: user.username || "",
+        },
+      },
+    });
+  } catch (error) {
+    console.error("🔥 [verifyEmailOTP] ERROR:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Internal server error.",
+    });
+  }
+};
 
 /**
  * Refresh JWT Token

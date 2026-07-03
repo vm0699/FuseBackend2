@@ -1,130 +1,116 @@
 import GiftIntent from "../models/GiftIntentModel.js";
 import GiftOrder from "../models/GiftOrder.js";
 import GiftPayment from "../models/GiftPaymentModel.js";
+import UserProfile from "../models/UserProfile.js";
 import notificationService from "../services/notificationService.js";
 import { NOTIFICATION_TYPES } from "../services/notifications/notificationTypes.js";
+import {
+  getGiftPaymentMode,
+  createGiftPayment,
+  verifyGiftPayment,
+} from "../services/giftPaymentProvider.js";
+import {
+  generateOrderCode,
+  isDeliveryAddressUsable,
+} from "../services/giftOrderService.js";
+import { notifyAdminsNewOrder } from "../services/adminAlertService.js";
 
-// 🧮 Helper: single-payer model → sender pays 100%
-const computePaymentShares = (intent) => {
-  const total = Number(intent.totalAmount || 0);
-
-  // In the current model:
-  // - LOW, MID, HIGH → sender pays full amount
-  // - recipient never pays
-  return { sender: total, recipient: 0 };
-};
-
-// STEP 1: Initiate payment for a given intent (SENDER ONLY in this model)
+/**
+ * STEP 1 — Initiate payment for an intent (SENDER ONLY, payment-first MVP).
+ *
+ * Idempotent: a retry/double-tap reuses the existing payment record for the
+ * intent (keyed by idempotencyKey = intentId) rather than creating a second.
+ */
 export const initiateGiftPayment = async (req, res) => {
   try {
     const { intentId } = req.params;
     const userId = req.user.id;
-    const { role: rawRole } = req.body; // optional hint from frontend
-
-    console.log("💳 [PAY] initiateGiftPayment", {
-      intentId,
-      userId,
-      rawRole,
-    });
 
     const intent = await GiftIntent.findById(intentId);
-
     if (!intent) {
       return res
         .status(404)
         .json({ success: false, message: "Gift intent not found" });
     }
 
-    // Only participants can touch this payment
-    const senderIdStr = intent.senderId.toString();
-    const recipientIdStr = intent.recipientId.toString();
-    const userIdStr = userId.toString();
-
-    if (![senderIdStr, recipientIdStr].includes(userIdStr)) {
+    // Only the sender may pay.
+    if (intent.senderId.toString() !== userId.toString()) {
       return res
         .status(403)
-        .json({ success: false, message: "Not allowed for this intent" });
+        .json({ success: false, message: "Only the sender can pay for this gift" });
     }
 
-    // Only allow payment in valid states
-    if (["REJECTED", "EXPIRED", "CANCELLED"].includes(intent.status)) {
+    // Payment-first: intent must be freshly CREATED.
+    if (intent.status !== "CREATED") {
       return res.status(400).json({
         success: false,
-        message: "Gift intent is not payable in current state",
+        message: "This gift is not payable in its current state",
       });
     }
 
-    const shares = computePaymentShares(intent);
-
-    // Decide role explicitly based on caller
-    let role;
-    if (userIdStr === senderIdStr) {
-      role = "SENDER";
-    } else if (userIdStr === recipientIdStr) {
-      role = "RECIPIENT";
-    } else {
-      role = rawRole || "SENDER";
-    }
-
-    // 💰 Single-payer: only sender is allowed to pay
-    if (role === "RECIPIENT") {
-      return res.status(400).json({
-        success: false,
-        message: "Recipient payment is not required for this gift",
-      });
-    }
-
-    const amount = shares.sender;
-
+    const amount = Number(intent.totalAmount || 0);
     if (!amount || amount <= 0) {
-      return res.status(400).json({
-        success: false,
-        message: "No payable amount for this user",
-      });
+      return res
+        .status(400)
+        .json({ success: false, message: "Invalid gift amount" });
     }
 
-    // If already paid, don't duplicate
-    const existingPaid = await GiftPayment.findOne({
-      giftIntentId: intent._id,
-      userId,
-      role,
-      status: "PAID",
-    });
+    const idempotencyKey = intent._id.toString();
 
-    if (existingPaid) {
+    // Reuse any existing payment for this intent.
+    const existing = await GiftPayment.findOne({ idempotencyKey });
+    if (existing) {
+      if (existing.status === "PAID") {
+        return res.status(200).json({
+          success: true,
+          alreadyPaid: true,
+          paymentId: existing._id,
+          amount: existing.amount,
+          currency: existing.currency,
+          mode: existing.mode,
+          providerOrderId: existing.providerOrderId || null,
+        });
+      }
+      // Return the in-flight record again.
       return res.status(200).json({
         success: true,
-        alreadyPaid: true,
-        paymentId: existingPaid._id,
-        amount: existingPaid.amount,
-        currency: existingPaid.currency,
+        paymentId: existing._id,
+        amount: existing.amount,
+        currency: existing.currency,
+        mode: existing.mode,
+        providerOrderId: existing.providerOrderId || null,
       });
     }
 
-    // Create INITIATED record (gateway order will attach later)
+    // Ask the provider adapter to create an order (placeholder or razorpay).
+    const providerResult = await createGiftPayment({
+      amount,
+      currency: "INR",
+      intentId: intent._id.toString(),
+    });
+
     const payment = await GiftPayment.create({
       giftIntentId: intent._id,
       userId,
-      role,
+      role: "SENDER",
       amount,
       currency: "INR",
-      provider: "RAZORPAY",
+      mode: providerResult.mode,
+      provider: providerResult.provider,
+      providerOrderId: providerResult.providerOrderId,
+      idempotencyKey,
       status: "INITIATED",
     });
 
-    console.log("💳 [PAY] Payment INITIATED", {
-      paymentId: payment._id.toString(),
-      role,
-      amount,
-    });
-
-    // 👉 Frontend will now use `amount` to open Razorpay checkout etc.
     return res.status(201).json({
       success: true,
       paymentId: payment._id,
       amount,
       currency: "INR",
-      role,
+      mode: payment.mode,
+      providerOrderId: payment.providerOrderId || null,
+      razorpayKeyId:
+        payment.mode === "RAZORPAY" ? process.env.RAZORPAY_KEY_ID || null : null,
     });
   } catch (err) {
     console.error("🔥 [PAY] initiateGiftPayment error", err);
@@ -135,7 +121,12 @@ export const initiateGiftPayment = async (req, res) => {
   }
 };
 
-// STEP 2: Confirm a successful payment from frontend / webhook
+/**
+ * STEP 2 — Confirm payment and create the order in ADMIN_REVIEW.
+ *
+ * On success: payment->PAID, intent->PAID, GiftOrder created idempotently with a
+ * frozen recipient address snapshot (sender never sees it), admin alerted.
+ */
 export const confirmGiftPayment = async (req, res) => {
   try {
     const { intentId } = req.params;
@@ -143,20 +134,12 @@ export const confirmGiftPayment = async (req, res) => {
     const {
       paymentId,
       providerPaymentId,
+      signature,
       status: requestedStatus,
       failureReason,
-    } = req.body;
-
-    console.log("💳 [PAY] confirmGiftPayment", {
-      intentId,
-      userId,
-      paymentId,
-      providerPaymentId,
-      requestedStatus,
-    });
+    } = req.body || {};
 
     const payment = await GiftPayment.findById(paymentId);
-
     if (!payment) {
       return res
         .status(404)
@@ -164,36 +147,42 @@ export const confirmGiftPayment = async (req, res) => {
     }
 
     if (payment.giftIntentId.toString() !== intentId.toString()) {
-      return res.status(400).json({
-        success: false,
-        message: "Payment does not belong to this intent",
-      });
+      return res
+        .status(400)
+        .json({ success: false, message: "Payment does not belong to this intent" });
     }
 
+    // Sender-only.
     if (payment.userId.toString() !== userId.toString()) {
-      return res.status(403).json({
-        success: false,
-        message: "You cannot confirm someone else's payment",
-      });
-    }
-
-    if (payment.status === "PAID") {
-      return res.status(200).json({
-        success: true,
-        alreadyConfirmed: true,
-      });
+      return res
+        .status(403)
+        .json({ success: false, message: "You cannot confirm this payment" });
     }
 
     const intent = await GiftIntent.findById(intentId);
-
     if (!intent) {
       return res
         .status(404)
         .json({ success: false, message: "Gift intent not found" });
     }
 
+    // Idempotent confirm: if already paid, return the existing order.
+    if (payment.status === "PAID") {
+      const existingOrder = await GiftOrder.findOne({ intentId: intent._id });
+      return res.status(200).json({
+        success: true,
+        alreadyConfirmed: true,
+        intentStatus: intent.status,
+        order: existingOrder
+          ? { _id: existingOrder._id, orderCode: existingOrder.orderCode, status: existingOrder.status }
+          : null,
+      });
+    }
+
+    const mode = getGiftPaymentMode();
     const normalizedStatus = String(requestedStatus || "PAID").toUpperCase();
 
+    // Explicit client-reported failure.
     if (normalizedStatus === "FAILED") {
       payment.status = "FAILED";
       payment.providerPaymentId = providerPaymentId || null;
@@ -204,18 +193,11 @@ export const confirmGiftPayment = async (req, res) => {
         payment.userId,
         notificationService.buildNotificationPayload({
           type: NOTIFICATION_TYPES.GIFT_PAYMENT_FAILED,
-          title: "Gift payment failed",
-          body: "Your gift payment could not be completed.",
           data: {
             intentId: intent._id.toString(),
-            chatId: intent.chatId?.toString?.() || intent.chatId,
-            senderId: intent.senderId?.toString?.() || intent.senderId,
-            recipientId: intent.recipientId?.toString?.() || intent.recipientId,
+            chatId: String(intent.chatId),
             paymentId: payment._id.toString(),
             screen: "GiftIntentDetailsScreen",
-            extra: {
-              failureReason: payment.failureReason,
-            },
           },
         })
       );
@@ -224,111 +206,153 @@ export const confirmGiftPayment = async (req, res) => {
         success: true,
         paymentStatus: payment.status,
         intentStatus: intent.status,
-        fullyPaid: false,
-        orderId: null,
+        order: null,
       });
     }
 
-    // ✅ Mark payment as PAID (we trust Razorpay callback / frontend for now)
+    // Verify with the provider adapter (placeholder trusts; razorpay checks HMAC).
+    const verification = await verifyGiftPayment({
+      providerOrderId: payment.providerOrderId,
+      providerPaymentId,
+      signature,
+    });
+
+    if (!verification.verified) {
+      payment.status = "FAILED";
+      payment.failureReason = "verification_failed";
+      await payment.save();
+      return res.status(400).json({
+        success: false,
+        message: "Payment verification failed",
+      });
+    }
+
+    // Mark payment PAID.
     payment.status = "PAID";
-    payment.providerPaymentId = providerPaymentId || null;
+    payment.providerPaymentId = verification.providerPaymentId || providerPaymentId || null;
+    payment.verifiedAt = new Date();
+    payment.meta = { ...(payment.meta || {}), mode };
     await payment.save();
 
-    // 🔄 Update intent payment fields
-    if (payment.role === "SENDER") {
-      intent.senderPaidAmount = payment.amount;
-      intent.senderPaidAt = new Date();
-    } else if (payment.role === "RECIPIENT") {
-      // Should not happen in current model, but kept for future safety
-      intent.recipientPaidAmount = payment.amount;
-      intent.recipientPaidAt = new Date();
-    }
-
-    // ✅ Single-payer model:
-    // Gift is "fully paid" as soon as sender has paid.
-    const senderDone =
-      intent.senderPaidAmount && intent.senderPaidAmount > 0;
-
-    const fullyPaid = !!senderDone;
-
-    if (fullyPaid) {
-      intent.status = "PAID";
-    }
-
+    // Mark intent PAID.
+    intent.status = "PAID";
+    intent.senderPaidAmount = payment.amount;
+    intent.senderPaidAt = new Date();
     await intent.save();
 
-    // If fully paid, ensure a GiftOrder exists & store revenue data
-    let order = null;
+    // Create the order once (idempotent on intentId).
+    let order = await GiftOrder.findOne({ intentId: intent._id });
+    if (!order) {
+      // Freeze recipient delivery address (never exposed to sender).
+      const recipientProfile = await UserProfile.findById(intent.recipientId).select(
+        "deliveryAddress phoneNumber name"
+      );
+      const addr = recipientProfile?.deliveryAddress || {};
+      const addressMissing = !isDeliveryAddressUsable(addr);
 
-    if (fullyPaid) {
-      order = await GiftOrder.findOne({ intentId: intent._id });
+      const deliverySnapshot = {
+        name: addr.name || recipientProfile?.name || "",
+        phone: addr.phone || recipientProfile?.phoneNumber || "",
+        line1: addr.line1 || "",
+        line2: addr.line2 || "",
+        city: addr.city || "",
+        state: addr.state || "",
+        pincode: addr.pincode || "",
+        landmark: addr.landmark || "",
+        label: addr.label || "",
+      };
 
-      if (!order) {
-        const platformFee = Math.round(intent.totalAmount * 0.15); // 15% margin (tweak later)
+      const snap = intent.catalogSnapshot || {};
 
-        order = await GiftOrder.create({
-          chatId: intent.chatId,
-          intentId: intent._id,
-          senderId: intent.senderId,
-          recipientId: intent.recipientId,
-          tier: intent.tier,
-          items: intent.items, // items stored on intent
-          source: "FUSE_MANUAL",
-          totalAmount: intent.totalAmount,
-          senderPaidAmount: intent.senderPaidAmount || 0,
-          recipientPaidAmount: intent.recipientPaidAmount || 0,
-          currency: "INR",
-          platformFee,
-          deliveryFee: 0,
-          vendorCost: 0,
-          status: "CREATED",
-          // ❗ no deliverySnapshot / address exposed here from this controller
-          note: "",
-        });
+      order = await GiftOrder.create({
+        chatId: intent.chatId,
+        intentId: intent._id,
+        paymentId: payment._id,
+        orderCode: generateOrderCode(),
+        senderId: intent.senderId,
+        recipientId: intent.recipientId,
+        tier: intent.tier,
+        catalogItemId: intent.catalogItemId || null,
+        items: intent.items,
+        source: "FUSE_MANUAL",
+        totalAmount: intent.totalAmount,
+        senderPaidAmount: intent.senderPaidAmount || 0,
+        currency: "INR",
+        platformFee: Number(snap.platformFee || 0),
+        deliveryFee: Number(snap.deliveryFee || 0),
+        vendorCost: 0,
+        status: "ADMIN_REVIEW",
+        addressMissing,
+        deliverySnapshot,
+        statusHistory: [
+          {
+            status: "PAID",
+            action: "PAYMENT_CONFIRMED",
+            byUserId: intent.senderId,
+            byRole: "SENDER",
+            at: new Date(),
+          },
+          {
+            status: "ADMIN_REVIEW",
+            action: "AUTO_SUBMITTED",
+            byRole: "SYSTEM",
+            note: addressMissing ? "Recipient address missing — held for review" : "",
+            at: new Date(),
+          },
+        ],
+      });
 
-        console.log("📦 [ORDER] GiftOrder created after full payment", {
-          orderId: order._id.toString(),
-          intentId: intent._id.toString(),
-        });
-      }
+      // Fire admin alert without blocking the response.
+      notifyAdminsNewOrder(order).catch((e) =>
+        console.error("[GIFT] admin alert failed", e)
+      );
     }
 
-    const successPayload = {
-      type: NOTIFICATION_TYPES.GIFT_PAYMENT_SUCCESS,
-      title: "Gift payment successful",
-      body: "Your gift payment was completed successfully.",
-      data: {
-        intentId: intent._id.toString(),
-        orderId: order?._id?.toString?.() || null,
-        chatId: intent.chatId?.toString?.() || intent.chatId,
-        senderId: intent.senderId?.toString?.() || intent.senderId,
-        recipientId: intent.recipientId?.toString?.() || intent.recipientId,
-        paymentId: payment._id.toString(),
-        screen: order ? "GiftOrderTrackingScreen" : "GiftIntentDetailsScreen",
-      },
-    };
-
-    await notificationService.sendToUser(
-      payment.userId,
-      notificationService.buildNotificationPayload(successPayload)
-    );
-
-    if (fullyPaid && intent.recipientId?.toString() !== payment.userId.toString()) {
-      await notificationService.sendToUser(
-        intent.recipientId,
+    // Notify sender + recipient — fire-and-forget so a push failure never
+    // causes a 500 after the order is already persisted.
+    notificationService
+      .sendToUser(
+        intent.senderId,
         notificationService.buildNotificationPayload({
-          ...successPayload,
-          body: "A gift for you has been paid and is being processed.",
+          type: NOTIFICATION_TYPES.GIFT_PAYMENT_SUCCESS,
+          data: {
+            intentId: intent._id.toString(),
+            orderId: order._id.toString(),
+            chatId: String(intent.chatId),
+            paymentId: payment._id.toString(),
+            screen: "GiftOrderTrackingScreen",
+          },
         })
-      );
+      )
+      .catch((e) => console.error("[GIFT] sender notify failed", e));
+
+    if (intent.recipientId.toString() !== intent.senderId.toString()) {
+      notificationService
+        .sendToUser(
+          intent.recipientId,
+          notificationService.buildNotificationPayload({
+            type: NOTIFICATION_TYPES.GIFT_ORDER_STATUS,
+            title: "You have a gift! 🎁",
+            body: "Someone sent you a gift. It's being processed.",
+            data: {
+              orderId: order._id.toString(),
+              chatId: String(intent.chatId),
+              screen: "GiftOrderTrackingScreen",
+            },
+          })
+        )
+        .catch((e) => console.error("[GIFT] recipient notify failed", e));
     }
 
     return res.status(200).json({
       success: true,
       paymentStatus: payment.status,
       intentStatus: intent.status,
-      fullyPaid,
-      orderId: order ? order._id : null,
+      order: {
+        _id: order._id,
+        orderCode: order.orderCode,
+        status: order.status,
+      },
     });
   } catch (err) {
     console.error("🔥 [PAY] confirmGiftPayment error", err);

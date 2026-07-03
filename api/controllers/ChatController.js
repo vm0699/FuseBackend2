@@ -3,6 +3,7 @@ import Message from "../models/MessageModel.js";
 import UserProfile from "../models/UserProfile.js";
 import GiftOrder from "../models/GiftOrder.js";
 import GiftIntent from "../models/GiftIntentModel.js";
+import GiftCatalogItem from "../models/GiftCatalogItem.js";
 import Block from "../models/Block.js";
 import client from "../config/twilio.js";
 import dotenv from "dotenv";
@@ -10,6 +11,7 @@ import twilio from "twilio";
 import notificationService from "../services/notificationService.js";
 import { ensureChatTwilioChannel } from "../services/chatTwilioService.js";
 import { NOTIFICATION_TYPES } from "../services/notifications/notificationTypes.js";
+import { evaluateGiftEligibility } from "../services/giftEligibilityService.js";
 
 dotenv.config();
 
@@ -111,6 +113,12 @@ const mapGiftIntentForResponse = async (intent, currentUserId) => {
     ? populatedIntent.recipientId
     : populatedIntent.senderId;
 
+  // Surface any order created from this intent so the UI can jump to tracking.
+  // Address is never included here.
+  const linkedOrder = await GiftOrder.findOne({ intentId: populatedIntent._id })
+    .select("_id orderCode status")
+    .lean();
+
   return {
     intentId: populatedIntent._id,
     chatId: populatedIntent.chatId,
@@ -118,10 +126,19 @@ const mapGiftIntentForResponse = async (intent, currentUserId) => {
     status: populatedIntent.status,
     totalAmount: populatedIntent.totalAmount,
     items: populatedIntent.items || [],
+    catalogSnapshot: populatedIntent.catalogSnapshot || null,
+    quantity: populatedIntent.quantity || 1,
     senderId: populatedIntent.senderId?._id || populatedIntent.senderId,
     recipientId: populatedIntent.recipientId?._id || populatedIntent.recipientId,
     createdAt: populatedIntent.createdAt,
     updatedAt: populatedIntent.updatedAt,
+    order: linkedOrder
+      ? {
+          orderId: linkedOrder._id,
+          orderCode: linkedOrder.orderCode || null,
+          status: linkedOrder.status,
+        }
+      : null,
     counterpart: {
       id: counterpart?._id || null,
       name: counterpart?.name || "",
@@ -1004,123 +1021,151 @@ export const saveChatMessage = async (req, res) => {
 };
 
 
+// 🎁 GET /api/chat/:chatId/gift/eligibility
+export const getGiftEligibility = async (req, res) => {
+  try {
+    const { chatId } = req.params;
+    const result = await evaluateGiftEligibility({
+      chatId,
+      userId: req.user.id,
+    });
+    return res.status(200).json({ success: true, ...result });
+  } catch (error) {
+    console.error("🔥 [GIFT] getGiftEligibility error:", error);
+    // Fail closed: report not eligible so the client safely hides gifting.
+    return res.status(200).json({
+      success: true,
+      eligible: false,
+      reason: "UNKNOWN_ERROR",
+      chatStatus: null,
+      bothUsersChatted: false,
+      activeOrderExists: false,
+      limits: {
+        low: { canSend: false, reason: null },
+        mid: { canSend: false, reason: null },
+      },
+    });
+  }
+};
+
 export const createGiftIntent = async (req, res) => {
   try {
     const { chatId } = req.params;
     const senderId = req.user.id;
-    const { items } = req.body;
+    const { catalogItemId } = req.body || {};
+    // MVP: quantity is fixed at 1.
+    const quantity = 1;
 
-    if (!chatId || !Array.isArray(items) || items.length === 0) {
-      return res.status(400).json({ success: false, message: "Invalid payload" });
+    if (!chatId || !catalogItemId) {
+      return res
+        .status(400)
+        .json({ success: false, message: "catalogItemId is required" });
     }
 
-    const chat = await Chat.findById(chatId);
-    if (!chat || chat.status !== "accepted") {
+    // 🔒 Full eligibility gate (accepted chat, both chatted, no block/report,
+    //    no active order, rate limits). Source of truth for who the recipient is.
+    const eligibility = await evaluateGiftEligibility({ chatId, userId: senderId });
+    if (!eligibility.eligible) {
       return res.status(400).json({
         success: false,
-        message: "Chat not accepted",
+        message: "Gifting is not available for this chat right now",
+        reason: eligibility.reason,
+        eligibility,
       });
     }
 
-    // 🔒 Interaction threshold (both must have chatted)
-    const storedSenders = await Message.distinct("sender", { chatId: chat._id });
-    const uniqueSenders = new Set([
-      ...storedSenders.map((sender) => sender?.toString?.() || String(sender)),
-      ...getLegacyMessages(chat).map((legacyMessage) => legacyMessage?.sender?.toString?.()),
-    ].filter(Boolean));
-    if (uniqueSenders.size < 2) {
+    const recipientId = eligibility.recipientId;
+
+    // 🎁 Catalog is the only source of truth for tier + price.
+    const item = await GiftCatalogItem.findById(catalogItemId);
+    if (!item || !item.isActive || !["LOW", "MID"].includes(item.tier)) {
+      return res
+        .status(400)
+        .json({ success: false, message: "Gift is not available" });
+    }
+
+    const tier = item.tier;
+
+    // 🔒 Enforce the tier-specific rate limit from the same eligibility result.
+    const tierLimit =
+      tier === "LOW" ? eligibility.limits.low : eligibility.limits.mid;
+    if (!tierLimit.canSend) {
       return res.status(400).json({
         success: false,
-        message: "Minimum interaction not met",
+        message:
+          tier === "LOW"
+            ? "You've reached the limit for low-cost gifts"
+            : "You've reached the limit for mid-cost gifts",
+        reason: tierLimit.reason,
       });
     }
 
-    const senderIdStr = chat.senderId.toString();
-    const recipientId =
-      senderId.toString() === senderIdStr ? chat.receiverId : chat.senderId;
+    // 💰 Amount computed entirely on the backend from the catalog snapshot.
+    const totalAmount = Number(item.finalAmount) * quantity;
 
-    // 💰 Calculate total
-    const totalAmount = items.reduce(
-      (sum, item) =>
-        sum + Number(item.price || 0) * Number(item.quantity || 1),
-      0
-    );
-
-    const tier = determineGiftTier(totalAmount);
-    // (we still *can* call buildGiftRules if you use it elsewhere)
-    const rules = buildGiftRules(tier);
-
-    // 🔒 LOW TIER DAILY LIMIT (1 per chat per day)
-    if (tier === "LOW") {
-      const today = new Date();
-      today.setHours(0, 0, 0, 0);
-
-      const count = await GiftIntent.countDocuments({
-        chatId,
-        tier: "LOW",
-        createdAt: { $gte: today },
-      });
-
-      if (count >= 1) {
-        return res.status(400).json({
-          success: false,
-          message: "Low-cost gift limit reached for today",
-        });
-      }
-    }
+    const catalogSnapshot = {
+      name: item.name,
+      description: item.description || "",
+      tier: item.tier,
+      imageUrl: item.imageUrl || "",
+      category: item.category || "",
+      occasion: item.occasion || "",
+      price: item.price,
+      platformFee: item.platformFee,
+      deliveryFee: item.deliveryFee,
+      finalAmount: item.finalAmount,
+    };
 
     const giftIntent = await GiftIntent.create({
       chatId,
       senderId,
       recipientId,
       tier,
-      items,
+      catalogItemId: item._id,
+      catalogSnapshot,
+      quantity,
+      // Backward-compatible single line item.
+      items: [
+        {
+          itemId: item._id.toString(),
+          name: item.name,
+          quantity,
+          price: item.finalAmount,
+          source: "FUSE_MANUAL",
+        },
+      ],
       totalAmount,
-      // 🔹 LOW → no consent, MID/HIGH → wait for recipient consent
-      status: tier === "LOW" ? "CREATED" : "AWAITING_RECIPIENT",
+      status: "CREATED",
       rulesSnapshot: {
         lowLimit: 499,
         midLimit: 2999,
-        // 🔹 In single-payer model:
-        //    – consent required only for MID/HIGH
-        //    – recipient never pays
-        requiresRecipientConsent: tier !== "LOW",
+        requiresRecipientConsent: false,
         requiresRecipientPayment: false,
       },
-      expiresAt:
-        tier === "LOW"
-          ? null
-          : new Date(Date.now() + 24 * 60 * 60 * 1000),
     });
 
-    await notificationService.sendToUser(
-      recipientId,
-      notificationService.buildNotificationPayload({
-        type: NOTIFICATION_TYPES.GIFT_INTENT_RECEIVED,
-        title: "Gift request received",
-        body: `${getDisplayName(req.user)} sent you a gift intent.`,
-        data: {
-          intentId: giftIntent._id.toString(),
-          chatId: String(chatId),
-          senderId: String(senderId),
-          recipientId: String(recipientId),
-          screen: "GiftIntentDetailsScreen",
-          extra: {
-            counterpartName: getDisplayName(req.user),
-            tier,
-          },
-        },
-      })
-    );
+    // No recipient notification here — payment-first. Recipient is notified
+    // only once payment succeeds and an order exists (avoids "buying attention").
 
     return res.status(201).json({
       success: true,
       giftIntentId: giftIntent._id,
-      tier,
-      nextAction:
-        tier === "LOW"
-          ? "PROCEED_TO_PAYMENT"
-          : "WAIT_FOR_RECIPIENT",
+      intent: {
+        intentId: giftIntent._id,
+        chatId,
+        tier,
+        status: giftIntent.status,
+        catalogSnapshot,
+        quantity,
+      },
+      amountBreakdown: {
+        price: item.price,
+        platformFee: item.platformFee,
+        deliveryFee: item.deliveryFee,
+        total: totalAmount,
+        currency: "INR",
+      },
+      nextAction: "PROCEED_TO_PAYMENT",
     });
   } catch (err) {
     console.error("🔥 createGiftIntent error:", err);
@@ -1132,173 +1177,9 @@ export const createGiftIntent = async (req, res) => {
 };
 
 
-export const acceptGiftIntent = async (req, res) => {
-  console.log("🔔 [DEBUG] acceptGiftIntent route hit");
-
-  try {
-    const { intentId } = req.params;
-    const userId = req.user.id;
-    console.log("🔔 [DEBUG] intentId:", intentId);
-    console.log("🔔 [DEBUG] userId:", userId);
-
-    const intent = await GiftIntent.findById(intentId);
-    if (!intent) {
-      return res
-        .status(404)
-        .json({ success: false, message: "Gift intent not found" });
-    }
-
-    console.log("🔔 [DEBUG] GiftIntent found", intent);
-
-    // 🔒 Tier check – LOW never needs acceptance
-    if (intent.tier === "LOW") {
-      console.log("❌ [GIFT] Low-cost gifts do not require acceptance", {
-        intentId,
-      });
-      return res.status(400).json({
-        success: false,
-        message: "Low-cost gifts do not require acceptance",
-      });
-    }
-
-    // 🔒 Only recipient can accept
-    if (intent.recipientId.toString() !== userId.toString()) {
-      console.log("❌ [GIFT] Only recipient can accept this gift", {
-        intentId,
-        recipientId: intent.recipientId,
-        userId,
-      });
-      return res.status(403).json({
-        success: false,
-        message: "Only recipient can accept this gift",
-      });
-    }
-
-    // 🔒 State check – must be waiting for recipient
-    if (intent.status !== "AWAITING_RECIPIENT") {
-      console.log("❌ [GIFT] Gift intent is not awaiting acceptance", {
-        intentId,
-        status: intent.status,
-      });
-      return res.status(400).json({
-        success: false,
-        message: "Gift intent is not awaiting acceptance",
-      });
-    }
-
-    // ✅ Accept → now sender can pay (single payer)
-    intent.status = "ACCEPTED";
-    await intent.save();
-
-    await notificationService.sendToUser(
-      intent.senderId,
-      notificationService.buildNotificationPayload({
-        type: NOTIFICATION_TYPES.GIFT_INTENT_ACCEPTED,
-        title: "Gift accepted",
-        body: "Your gift intent was accepted.",
-        data: {
-          intentId: intent._id.toString(),
-          chatId: intent.chatId?.toString?.() || intent.chatId,
-          senderId: intent.senderId?.toString?.() || intent.senderId,
-          recipientId: intent.recipientId?.toString?.() || intent.recipientId,
-          screen: "GiftIntentDetailsScreen",
-        },
-      })
-    );
-
-    console.log("✅ [GIFT] Gift intent accepted", {
-      intentId: intent._id.toString(),
-      tier: intent.tier,
-    });
-
-    return res.status(200).json({
-      success: true,
-      intentId: intent._id,
-      status: intent.status,
-    });
-  } catch (error) {
-    console.error("🔥 [GIFT] acceptGiftIntent error:", error);
-    return res.status(500).json({
-      success: false,
-      message: "Failed to accept gift",
-    });
-  }
-};
-
-
-export const rejectGiftIntent = async (req, res) => {
-  try {
-    const { intentId } = req.params;
-    const userId = req.user.id;
-
-    const intent = await GiftIntent.findById(intentId);
-    if (!intent) {
-      return res
-        .status(404)
-        .json({ success: false, message: "Gift intent not found" });
-    }
-
-    // 🔒 In our current model: LOW gifts are "just sent", no rejection stage
-    if (intent.tier === "LOW") {
-      return res.status(400).json({
-        success: false,
-        message: "Low-cost gifts cannot be rejected",
-      });
-    }
-
-    // 🔒 Only recipient can reject
-    if (intent.recipientId.toString() !== userId.toString()) {
-      return res.status(403).json({
-        success: false,
-        message: "Only recipient can reject this gift",
-      });
-    }
-
-    // 🔒 Can only reject while still waiting on recipient consent
-    if (intent.status !== "AWAITING_RECIPIENT") {
-      return res.status(400).json({
-        success: false,
-        message: "Gift intent cannot be rejected at this stage",
-      });
-    }
-
-    intent.status = "CANCELLED";
-    await intent.save();
-
-    await notificationService.sendToUser(
-      intent.senderId,
-      notificationService.buildNotificationPayload({
-        type: NOTIFICATION_TYPES.GIFT_INTENT_REJECTED,
-        title: "Gift declined",
-        body: "Your gift intent was declined.",
-        data: {
-          intentId: intent._id.toString(),
-          chatId: intent.chatId?.toString?.() || intent.chatId,
-          senderId: intent.senderId?.toString?.() || intent.senderId,
-          recipientId: intent.recipientId?.toString?.() || intent.recipientId,
-          screen: "GiftIntentDetailsScreen",
-        },
-      })
-    );
-
-    console.log("❌ [GIFT] Gift intent rejected", {
-      intentId: intent._id.toString(),
-      tier: intent.tier,
-    });
-
-    return res.status(200).json({
-      success: true,
-      intentId: intent._id,
-      status: intent.status,
-    });
-  } catch (error) {
-    console.error("🔥 [GIFT] rejectGiftIntent error:", error);
-    return res.status(500).json({
-      success: false,
-      message: "Failed to reject gift",
-    });
-  }
-};
+// NOTE: acceptGiftIntent / rejectGiftIntent were removed in Phase 2.
+// Gifting is now payment-first (no recipient consent step). Recipients can
+// decline a paid order before fulfilment via POST /api/gifts/orders/:orderId/decline.
 
 export const getGiftIntentDetails = async (req, res) => {
   try {
@@ -1343,118 +1224,6 @@ export const getGiftIntentDetails = async (req, res) => {
 
 
 
-export const createGiftOrder = async (req, res) => {
-  try {
-    const { chatId } = req.params;
-    const senderId = req.user.id;
-    const { note } = req.body || {};
-
-    console.log("🎁 [GIFT] createGiftOrder called", {
-      chatId,
-      senderId,
-    });
-
-    // 🔒 GiftOrder must come from a valid GiftIntent for this chat + sender
-    // For now we allow latest intent in CREATED / ACCEPTED / PAID to be used,
-    // depending on when you call this (pre- or post-payment wiring).
-    const activeIntent = await GiftIntent.findOne({
-      chatId,
-      senderId,
-      status: { $in: ["CREATED", "ACCEPTED", "PAID"] },
-    }).sort({ createdAt: -1 });
-
-    if (!activeIntent) {
-      return res.status(400).json({
-        success: false,
-        message: "No active gift intent found for this chat",
-      });
-    }
-
-    // 🔍 Load chat
-    const chat = await Chat.findById(chatId);
-    if (!chat) {
-      return res
-        .status(404)
-        .json({ success: false, message: "Chat not found" });
-    }
-
-    // 🔒 Chat must be accepted
-    if (chat.status !== "accepted") {
-      return res.status(400).json({
-        success: false,
-        message: "Gift can only be sent in accepted chats",
-      });
-    }
-
-    const senderIdStr = chat.senderId.toString();
-    const receiverIdStr = chat.receiverId.toString();
-
-    if (![senderIdStr, receiverIdStr].includes(senderId.toString())) {
-      return res.status(403).json({
-        success: false,
-        message: "Unauthorized for this chat",
-      });
-    }
-
-    // 🎯 Determine recipient
-    const recipientId =
-      senderId.toString() === senderIdStr ? receiverIdStr : senderIdStr;
-
-    // 📦 Load recipient profile (ADDRESS SOURCE OF TRUTH)
-    const recipientProfile = await UserProfile.findById(recipientId);
-    if (!recipientProfile || !recipientProfile.deliveryAddress) {
-      return res.status(400).json({
-        success: false,
-        message: "Recipient has no delivery address set",
-      });
-    }
-
-    // 🧊 Freeze delivery snapshot (stored in DB only; never sent to sender)
-    const deliverySnapshot = {
-      ...recipientProfile.deliveryAddress,
-    };
-
-    // 💰 Use total from intent (we don't trust client body for amount)
-    const totalAmount = Number(activeIntent.totalAmount || 0);
-    const items = activeIntent.items || [];
-    const source = "FUSE_MANUAL";
-
-    // 🧾 Create Gift Order
-    const giftOrder = new GiftOrder({
-      chatId,
-      intentId: activeIntent._id, // ok even if not in schema; extra field is ignored if strict
-      senderId,
-      recipientId,
-      tier: activeIntent.tier,
-      items,
-      source,
-      totalAmount,
-      deliverySnapshot,
-      note: note || "",
-      status: "CREATED",
-    });
-
-    await giftOrder.save();
-
-    console.log("✅ [GIFT] Order created", {
-      orderId: giftOrder._id.toString(),
-      totalAmount,
-      recipientId,
-    });
-
-    // ❗ DO NOT return address to sender
-    return res.status(201).json({
-      success: true,
-      orderId: giftOrder._id,
-      totalAmount,
-      source,
-      tier: activeIntent.tier,
-    });
-  } catch (error) {
-    console.error("🔥 [GIFT] createGiftOrder error:", error);
-    return res.status(500).json({
-      success: false,
-      message: "Failed to create gift order",
-    });
-  }
-};
+// NOTE: the legacy createGiftOrder endpoint was removed in Phase 2.
+// Orders are now created automatically after a successful payment in
+// GiftPaymentController.confirmGiftPayment (with a frozen address snapshot).

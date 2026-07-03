@@ -1,62 +1,13 @@
 import GiftOrder from "../models/GiftOrder.js";
+import GiftPayment from "../models/GiftPaymentModel.js";
 import notificationService from "../services/notificationService.js";
 import { NOTIFICATION_TYPES } from "../services/notifications/notificationTypes.js";
+import { serializeOrderForViewer } from "../services/giftOrderService.js";
 
-// Small helper so we never expose full address
-const buildDeliveryPublicView = (deliverySnapshot = {}) => ({
-  city: deliverySnapshot.city || null,
-  state: deliverySnapshot.state || null,
-  label: deliverySnapshot.label || null,
-});
+// Recipient may decline only before fulfilment.
+const DECLINABLE_STATUSES = ["PAID", "ADMIN_REVIEW", "APPROVED", "PROCESSING"];
 
-const mapOrderForList = (order, perspective = "SENDER") => {
-  const sender = order.senderId;
-  const recipient = order.recipientId;
-
-  const counterpart =
-    perspective === "SENDER" ? recipient : sender;
-
-  return {
-    orderId: order._id,
-    intentId: order.intentId || null,
-    chatId: order.chatId,
-    tier: order.tier || null,
-    totalAmount: order.totalAmount,
-    currency: order.currency,
-    status: order.status,
-    createdAt: order.createdAt,
-    updatedAt: order.updatedAt,
-
-    items: order.items.map((it) => ({
-      itemId: it.itemId,
-      name: it.name,
-      quantity: it.quantity,
-      price: it.price,
-      source: it.source,
-    })),
-
-    tracking: {
-      status: order.status,
-      trackingUrl: order.trackingUrl || null,
-      dispatchedAt: order.dispatchedAt || null,
-      deliveredAt: order.deliveredAt || null,
-    },
-
-    delivery: buildDeliveryPublicView(order.deliverySnapshot),
-
-    counterpart: {
-      id: counterpart?._id || null,
-      name: counterpart?.name || "",
-      username: counterpart?.username || "",
-      photo:
-        Array.isArray(counterpart?.photos) &&
-        counterpart.photos.length > 0
-          ? counterpart.photos[0]
-          : null,
-    },
-  };
-};
-
+// GET /api/chat/gifts/order/:orderId
 export const getGiftOrderDetails = async (req, res) => {
   try {
     const { orderId } = req.params;
@@ -67,36 +18,31 @@ export const getGiftOrderDetails = async (req, res) => {
       .populate("recipientId", "name username photos");
 
     if (!order) {
-      return res.status(404).json({
-        success: false,
-        message: "Gift order not found",
-      });
+      return res
+        .status(404)
+        .json({ success: false, message: "Gift order not found" });
     }
 
-    const userIdStr = userId.toString();
-    const senderStr = order.senderId?._id?.toString?.() || order.senderId?.toString?.();
+    const senderStr =
+      order.senderId?._id?.toString?.() || order.senderId?.toString?.();
     const recipientStr =
       order.recipientId?._id?.toString?.() || order.recipientId?.toString?.();
 
-    if (![senderStr, recipientStr].includes(userIdStr)) {
-      return res.status(403).json({
-        success: false,
-        message: "Not authorized to view this order",
-      });
+    if (![senderStr, recipientStr].includes(userId.toString())) {
+      return res
+        .status(403)
+        .json({ success: false, message: "Not authorized to view this order" });
     }
-
-    const perspective = senderStr === userIdStr ? "SENDER" : "RECIPIENT";
 
     return res.status(200).json({
       success: true,
-      order: mapOrderForList(order, perspective),
+      order: serializeOrderForViewer(order, userId),
     });
   } catch (err) {
     console.error("🔥 [GIFT] getGiftOrderDetails error:", err);
-    return res.status(500).json({
-      success: false,
-      message: "Failed to fetch gift order",
-    });
+    return res
+      .status(500)
+      .json({ success: false, message: "Failed to fetch gift order" });
   }
 };
 
@@ -105,10 +51,7 @@ export const getSentGifts = async (req, res) => {
   try {
     const userId = req.user.id;
     const page = Math.max(parseInt(req.query.page || "1", 10), 1);
-    const limit = Math.min(
-      Math.max(parseInt(req.query.limit || "10", 10), 1),
-      50
-    );
+    const limit = Math.min(Math.max(parseInt(req.query.limit || "10", 10), 1), 50);
     const skip = (page - 1) * limit;
 
     const [total, orders] = await Promise.all([
@@ -121,22 +64,19 @@ export const getSentGifts = async (req, res) => {
         .populate("recipientId", "name username photos"),
     ]);
 
-    const data = orders.map((o) => mapOrderForList(o, "SENDER"));
-
     return res.status(200).json({
       success: true,
       page,
       limit,
       total,
       totalPages: Math.ceil(total / limit),
-      orders: data,
+      orders: orders.map((o) => serializeOrderForViewer(o, userId)),
     });
   } catch (err) {
     console.error("🔥 [GIFT] getSentGifts error:", err);
-    return res.status(500).json({
-      success: false,
-      message: "Failed to fetch sent gifts",
-    });
+    return res
+      .status(500)
+      .json({ success: false, message: "Failed to fetch sent gifts" });
   }
 };
 
@@ -145,10 +85,7 @@ export const getReceivedGifts = async (req, res) => {
   try {
     const userId = req.user.id;
     const page = Math.max(parseInt(req.query.page || "1", 10), 1);
-    const limit = Math.min(
-      Math.max(parseInt(req.query.limit || "10", 10), 1),
-      50
-    );
+    const limit = Math.min(Math.max(parseInt(req.query.limit || "10", 10), 1), 50);
     const skip = (page - 1) * limit;
 
     const [total, orders] = await Promise.all([
@@ -161,148 +98,101 @@ export const getReceivedGifts = async (req, res) => {
         .populate("recipientId", "name username photos"),
     ]);
 
-    const data = orders.map((o) => mapOrderForList(o, "RECIPIENT"));
-
     return res.status(200).json({
       success: true,
       page,
       limit,
       total,
       totalPages: Math.ceil(total / limit),
-      orders: data,
+      orders: orders.map((o) => serializeOrderForViewer(o, userId)),
     });
   } catch (err) {
     console.error("🔥 [GIFT] getReceivedGifts error:", err);
-    return res.status(500).json({
-      success: false,
-      message: "Failed to fetch received gifts",
-    });
+    return res
+      .status(500)
+      .json({ success: false, message: "Failed to fetch received gifts" });
   }
 };
 
-// PATCH /api/chat/gifts/order/:orderId/status
-export const updateGiftOrderStatus = async (req, res) => {
+/**
+ * POST /api/gifts/orders/:orderId/decline
+ * Recipient declines a paid gift before fulfilment.
+ *  - if a successful payment exists -> REFUND_REQUIRED
+ *  - otherwise -> CANCELLED
+ * Sender is notified with status only (no reason).
+ */
+export const declineGiftOrder = async (req, res) => {
   try {
     const { orderId } = req.params;
     const userId = req.user.id;
-    const { status, trackingUrl, vendorOrderId } = req.body;
-
-    const allowedStatuses = [
-      "CREATED",
-      "PROCESSING",
-      "DISPATCHED",
-      "DELIVERED",
-      "FAILED",
-      "CANCELLED",
-    ];
-
-    if (!status || !allowedStatuses.includes(status)) {
-      return res.status(400).json({
-        success: false,
-        message: "Invalid or missing status value",
-      });
-    }
 
     const order = await GiftOrder.findById(orderId);
-
     if (!order) {
       return res
         .status(404)
         .json({ success: false, message: "Gift order not found" });
     }
 
-    const userIdStr = userId.toString();
-    const senderStr = order.senderId.toString();
-    const recipientStr = order.recipientId.toString();
+    // Only the recipient can decline.
+    if (order.recipientId.toString() !== userId.toString()) {
+      return res
+        .status(403)
+        .json({ success: false, message: "Only the recipient can decline this gift" });
+    }
 
-    // For now: only participants can update in Postman tests.
-    // Later: this can be restricted to admin / ops.
-    if (![senderStr, recipientStr].includes(userIdStr)) {
-      return res.status(403).json({
+    if (!DECLINABLE_STATUSES.includes(order.status)) {
+      return res.status(400).json({
         success: false,
-        message: "Not authorized to update this order",
+        message: "This gift can no longer be declined",
       });
     }
 
-    order.status = status;
-
-    if (typeof trackingUrl === "string") {
-      order.trackingUrl = trackingUrl;
-    }
-
-    if (typeof vendorOrderId === "string") {
-      order.vendorOrderId = vendorOrderId;
-    }
+    const paidPayment = await GiftPayment.findOne({
+      giftIntentId: order.intentId,
+      status: "PAID",
+    });
 
     const now = new Date();
-    if (status === "DISPATCHED" && !order.dispatchedAt) {
-      order.dispatchedAt = now;
-    }
-    if (status === "DELIVERED" && !order.deliveredAt) {
-      order.deliveredAt = now;
-    }
-    if (
-      (status === "FAILED" || status === "CANCELLED") &&
-      !order.cancelledAt
-    ) {
+    const newStatus = paidPayment ? "REFUND_REQUIRED" : "CANCELLED";
+    order.status = newStatus;
+    if (newStatus === "REFUND_REQUIRED") {
+      order.refundRequiredAt = now;
+    } else {
       order.cancelledAt = now;
     }
-
+    order.statusHistory.push({
+      status: newStatus,
+      action: "RECIPIENT_DECLINED",
+      byUserId: userId,
+      byRole: "RECIPIENT",
+      at: now,
+    });
     await order.save();
 
-    const notificationTypeByStatus = {
-      DISPATCHED: NOTIFICATION_TYPES.GIFT_ORDER_DISPATCHED,
-      DELIVERED: NOTIFICATION_TYPES.GIFT_ORDER_DELIVERED,
-    };
-
-    const notificationType = notificationTypeByStatus[status];
-    if (notificationType) {
-      const userIdsToNotify = Array.from(
-        new Set([
-          order.senderId?.toString?.() || order.senderId,
-          order.recipientId?.toString?.() || order.recipientId,
-        ].filter(Boolean))
-      );
-
-      await notificationService.sendToUsers(
-        userIdsToNotify,
+    // Notify sender — status only, no recipient reason. Fire-and-forget.
+    notificationService
+      .sendToUser(
+        order.senderId,
         notificationService.buildNotificationPayload({
-          type: notificationType,
+          type: NOTIFICATION_TYPES.GIFT_ORDER_DECLINED,
           data: {
             orderId: order._id.toString(),
-            intentId: order.intentId?.toString?.() || order.intentId || null,
-            chatId: order.chatId?.toString?.() || order.chatId,
-            senderId: order.senderId?.toString?.() || order.senderId,
-            recipientId: order.recipientId?.toString?.() || order.recipientId,
+            chatId: String(order.chatId),
             screen: "GiftOrderTrackingScreen",
-            extra: {
-              trackingUrl: order.trackingUrl || null,
-              status: order.status,
-            },
           },
         })
-      );
-    }
-
-    console.log("📦 [GIFT] Order status updated", {
-      orderId: order._id.toString(),
-      status: order.status,
-    });
+      )
+      .catch((e) => console.error("[GIFT] decline notify failed", e));
 
     return res.status(200).json({
       success: true,
       orderId: order._id,
       status: order.status,
-      trackingUrl: order.trackingUrl,
-      dispatchedAt: order.dispatchedAt,
-      deliveredAt: order.deliveredAt,
-      cancelledAt: order.cancelledAt,
     });
   } catch (err) {
-    console.error("🔥 [GIFT] updateGiftOrderStatus error:", err);
-    return res.status(500).json({
-      success: false,
-      message: "Failed to update gift order status",
-    });
+    console.error("🔥 [GIFT] declineGiftOrder error:", err);
+    return res
+      .status(500)
+      .json({ success: false, message: "Failed to decline gift order" });
   }
 };

@@ -2,6 +2,7 @@ import UserProfile from '../models/UserProfile.js';
 import Like from '../models/Like.js';
 import Chat from '../models/ChatModel.js';
 import Block from "../models/Block.js";
+import SwipeRecord from '../models/SwipeRecord.js';
 import { DeleteObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import client from "../config/twilio.js";
 import fs from 'fs';
@@ -514,11 +515,12 @@ export const getProfileByPhoneNumber = async (req, res) => {
 
 const DEFAULT_DISCOVERY_LIMIT = 8;
 const MAX_DISCOVERY_LIMIT = 20;
-const DISCOVERY_CANDIDATE_BUFFER = 48;
-const DISCOVERY_CANDIDATE_MULTIPLIER = 6;
-const MAX_DISCOVERY_CANDIDATES = 240;
+const MAX_DISCOVERY_CANDIDATES = 200;
 const EARTH_RADIUS_KM = 6371;
 const DEG_TO_RAD = Math.PI / 180;
+const CACHE_TTL_MS = 15 * 60 * 1000;
+const CACHE_CLEANUP_INTERVAL_MS = 5 * 60 * 1000;
+
 const DISCOVERY_PROFILE_SELECT = [
   "_id",
   "name",
@@ -554,8 +556,38 @@ const DISCOVERY_PROFILE_SELECT = [
   "drugs",
   "location",
   "locationGeo",
+  "lastActiveAt",
   "updatedAt",
 ].join(" ");
+
+// ===== IN-MEMORY DECK CACHE (15-min TTL per user+filters) =====
+const discoveryDeckCache = new Map();
+
+setInterval(() => {
+  const now = Date.now();
+  for (const [key, entry] of discoveryDeckCache.entries()) {
+    if (now > entry.expiresAt) discoveryDeckCache.delete(key);
+  }
+}, CACHE_CLEANUP_INTERVAL_MS);
+
+function getCachedDeck(userId, filtersKey) {
+  const entry = discoveryDeckCache.get(userId);
+  if (!entry || Date.now() > entry.expiresAt || entry.filtersKey !== filtersKey) {
+    discoveryDeckCache.delete(userId);
+    return null;
+  }
+  return entry.deck;
+}
+
+function setCachedDeck(userId, deck, filtersKey) {
+  discoveryDeckCache.set(userId, {
+    deck,
+    filtersKey,
+    expiresAt: Date.now() + CACHE_TTL_MS,
+  });
+}
+
+// ===== UTILITY FUNCTIONS =====
 
 function parseDiscoveryNumber(value, fallback) {
   const parsed = Number.parseInt(value, 10);
@@ -563,100 +595,81 @@ function parseDiscoveryNumber(value, fallback) {
 }
 
 function normalizeDiscoveryFilters(rawFilters, fallbackInterests = []) {
-  const safeFilters =
-    rawFilters && typeof rawFilters === "object" ? rawFilters : {};
+  const safeFilters = rawFilters && typeof rawFilters === "object" ? rawFilters : {};
   const parsedDistance = Number(safeFilters.distanceKm);
-  const normalizedInterests = Array.isArray(safeFilters.interests)
-    ? safeFilters.interests.filter(
-        (value) => typeof value === "string" && value.trim()
-      )
-    : fallbackInterests;
+
+  const safeStringArray = (arr) =>
+    Array.isArray(arr) ? arr.filter((v) => typeof v === "string" && v.trim()) : [];
+
+  const rawInterests = safeStringArray(safeFilters.interests);
 
   return {
     ageRange:
       safeFilters.ageRange?.min && safeFilters.ageRange?.max
         ? {
             min: Math.max(Number(safeFilters.ageRange.min), 18),
-            max: Math.max(
-              Number(safeFilters.ageRange.max),
-              Number(safeFilters.ageRange.min)
-            ),
+            max: Math.max(Number(safeFilters.ageRange.max), Number(safeFilters.ageRange.min)),
           }
         : null,
     ageFlex: Boolean(safeFilters.ageFlex),
-    distanceKm:
-      Number.isFinite(parsedDistance) && parsedDistance > 0
-        ? parsedDistance
-        : null,
+    distanceKm: Number.isFinite(parsedDistance) && parsedDistance > 0 ? parsedDistance : null,
     distanceFlex: Boolean(safeFilters.distanceFlex),
-    interests: normalizedInterests,
+    interests: rawInterests.length > 0 ? rawInterests : fallbackInterests,
+    // Lifestyle preference filters (soft — boost score, never hard exclude)
+    datingIntentions: safeStringArray(safeFilters.datingIntentions),
+    religion: safeStringArray(safeFilters.religion),
+    ethnicity: safeStringArray(safeFilters.ethnicity),
+    drinking: safeStringArray(safeFilters.drinking),
+    smoking: safeStringArray(safeFilters.smoking),
+    // Hard cutoff: only show profiles active in the last 7 days
+    activeOnly: Boolean(safeFilters.activeOnly),
   };
 }
 
-function getPreferredGender(gender) {
-  if (gender === "Man") return "Woman";
-  if (gender === "Woman") return "Man";
+// Uses preferredGender field if set; falls back to binary Man↔Woman pairing
+function resolvePreferredGender(userProfile) {
+  if (Array.isArray(userProfile.preferredGender) && userProfile.preferredGender.length > 0) {
+    return userProfile.preferredGender;
+  }
+  if (userProfile.gender === "Man") return ["Woman"];
+  if (userProfile.gender === "Woman") return ["Man"];
   return null;
 }
 
-function buildDobRange(ageRange) {
-  if (!ageRange?.min || !ageRange?.max) return null;
+function calculateDistanceKm(latA, lngA, latB, lngB) {
+  if (
+    typeof latA !== "number" || typeof lngA !== "number" ||
+    typeof latB !== "number" || typeof lngB !== "number"
+  ) return null;
 
-  const today = new Date();
-  const minDOB = new Date(
-    today.getFullYear() - ageRange.max,
-    today.getMonth(),
-    today.getDate()
-  );
-  const maxDOB = new Date(
-    today.getFullYear() - ageRange.min,
-    today.getMonth(),
-    today.getDate()
-  );
+  const dLat = (latB - latA) * DEG_TO_RAD;
+  const dLng = (lngB - lngA) * DEG_TO_RAD;
+  const latARad = latA * DEG_TO_RAD;
+  const latBRad = latB * DEG_TO_RAD;
 
-  return {
-    $gte: minDOB.toISOString().slice(0, 10),
-    $lte: maxDOB.toISOString().slice(0, 10),
-  };
+  const a =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos(latARad) * Math.cos(latBRad) * Math.sin(dLng / 2) ** 2;
+
+  return 2 * EARTH_RADIUS_KM * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 }
 
-function buildBaseDiscoveryMatch({
-  requesterId,
-  preferredGender,
-  swipedUserIds,
-  excludeSwiped,
-  dobRange,
-  extraExcludedIds = [],
-}) {
-  const excludedIds = [
-    ...(excludeSwiped ? swipedUserIds : []),
-    ...extraExcludedIds,
-  ];
+function calculateAgeFromDob(dob) {
+  if (!dob) return null;
+  const today = new Date();
+  const birth = new Date(dob);
+  let age = today.getFullYear() - birth.getFullYear();
+  const m = today.getMonth() - birth.getMonth();
+  if (m < 0 || (m === 0 && today.getDate() < birth.getDate())) age--;
+  return age;
+}
 
-  const idMatch = { $ne: requesterId };
-  if (excludedIds.length) {
-    idMatch.$nin = excludedIds;
-  }
-
-  const match = {
-    _id: idMatch,
-    $or: [
-      { onboardingStage: "COMPLETE" },
-      { onboardingStage: { $exists: false } },
-      { onboardingStage: null },
-      { onboardingStage: "" },
-    ],
-  };
-
-  if (preferredGender) {
-    match.gender = preferredGender;
-  }
-
-  if (dobRange) {
-    match.dateOfBirth = dobRange;
-  }
-
-  return match;
+function getActivityLabel(lastActiveAt) {
+  if (!lastActiveAt) return null;
+  const diffDays = (Date.now() - new Date(lastActiveAt).getTime()) / 86400000;
+  if (diffDays < 1) return "today";
+  if (diffDays < 7) return "this week";
+  return null;
 }
 
 async function getBlockedProfileIds(userId) {
@@ -666,411 +679,228 @@ async function getBlockedProfileIds(userId) {
     .select("blockerId blockedId")
     .lean();
 
-  return blocks.reduce((blockedIds, block) => {
-    const otherUserId =
-      block.blockerId?.toString?.() === userId.toString()
-        ? block.blockedId?.toString?.()
-        : block.blockerId?.toString?.();
-
-    if (otherUserId) {
-      blockedIds.push(otherUserId);
-    }
-
-    return blockedIds;
+  return blocks.reduce((acc, block) => {
+    const other =
+      block.blockerId?.toString() === userId.toString()
+        ? block.blockedId?.toString()
+        : block.blockerId?.toString();
+    if (other) acc.push(other);
+    return acc;
   }, []);
 }
 
-function buildDiscoveryCandidateLimit(targetCount) {
-  return Math.min(
-    Math.max(
-      targetCount * DISCOVERY_CANDIDATE_MULTIPLIER,
-      targetCount + DISCOVERY_CANDIDATE_BUFFER
-    ),
-    MAX_DISCOVERY_CANDIDATES
-  );
-}
+// Reads from SwipeRecord (new); falls back to embedded UserProfile array (legacy data)
+async function getSwipedProfileIds(userId, fallbackSwipedUserIds) {
+  const records = await SwipeRecord.find({ swiperId: userId })
+    .select("swipedId")
+    .lean();
 
-function calculateDistanceKm(latitudeA, longitudeA, latitudeB, longitudeB) {
-  if (
-    typeof latitudeA !== "number" ||
-    typeof longitudeA !== "number" ||
-    typeof latitudeB !== "number" ||
-    typeof longitudeB !== "number"
-  ) {
-    return null;
+  if (records.length > 0) {
+    return records.map((r) => r.swipedId.toString());
   }
-
-  const latitudeDelta = (latitudeB - latitudeA) * DEG_TO_RAD;
-  const longitudeDelta = (longitudeB - longitudeA) * DEG_TO_RAD;
-  const latitudeARadians = latitudeA * DEG_TO_RAD;
-  const latitudeBRadians = latitudeB * DEG_TO_RAD;
-
-  const a =
-    Math.sin(latitudeDelta / 2) ** 2 +
-    Math.cos(latitudeARadians) *
-      Math.cos(latitudeBRadians) *
-      Math.sin(longitudeDelta / 2) ** 2;
-
-  return 2 * EARTH_RADIUS_KM * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return (fallbackSwipedUserIds || []).map((id) => id.toString());
 }
 
-function rankDiscoveryProfiles({
-  candidates,
-  discoveryInterests,
-  hasRequesterLocation,
-  requesterLatitude,
-  requesterLongitude,
-  distanceKm,
-}) {
-  const interestSet = new Set(discoveryInterests || []);
-  const distanceBoundaryActive = Boolean(distanceKm) && hasRequesterLocation;
+// Scores and sorts a pool of candidates.
+// Priority: activity recency → shared interests → lifestyle match → distance → age.
+// All filters are soft preferences — matching profiles rank higher but nothing is hard excluded
+// (except activeOnly which is applied as a DB filter before this function runs).
+function scoreAndRankCandidates({ candidates, requester, filters }) {
+  // Additive interests: filter interests + profile interests both contribute to scoring
+  const effectiveInterests = [
+    ...new Set([...(requester.interests || []), ...(filters.interests || [])]),
+  ];
+  const interestSet = new Set(effectiveInterests);
 
-  return candidates
-    .map((candidate) => {
-      const candidateInterests = Array.isArray(candidate.interests)
-        ? candidate.interests
-        : [];
-      const sharedInterestCount = candidateInterests.reduce(
-        (count, interest) => count + (interestSet.has(interest) ? 1 : 0),
-        0
-      );
-      const hasSharedInterests = sharedInterestCount > 0;
-      const hasLocation =
-        typeof candidate.location?.latitude === "number" &&
-        typeof candidate.location?.longitude === "number";
-      const candidateDistanceKm = hasRequesterLocation
-        ? calculateDistanceKm(
-            requesterLatitude,
-            requesterLongitude,
-            candidate.location?.latitude,
-            candidate.location?.longitude
-          )
-        : null;
-      const withinDistance = distanceBoundaryActive
-        ? candidateDistanceKm !== null && candidateDistanceKm <= distanceKm
-        : false;
+  const reqLat = requester.location?.latitude;
+  const reqLng = requester.location?.longitude;
+  const hasLocation = typeof reqLat === "number" && typeof reqLng === "number";
 
-      let discoveryBucket = 3;
-      if (hasSharedInterests && (!distanceBoundaryActive || withinDistance)) {
-        discoveryBucket = 0;
-      } else if (hasSharedInterests) {
-        discoveryBucket = 1;
-      } else if (distanceBoundaryActive && withinDistance) {
-        discoveryBucket = 2;
-      }
+  // distanceFlex=false → heavier weight so nearby profiles surface much higher
+  const distanceWeight = filters.distanceFlex ? 80 : 150;
+  const ageWeight = filters.ageFlex ? 80 : 150;
 
-      return {
-        ...candidate,
-        sharedInterestCount,
-        withinDistance,
-        distanceKm: candidateDistanceKm,
-        discoveryBucket,
-        discoveryScore:
-          (hasSharedInterests ? 1000 : 0) +
-          (withinDistance ? 100 : 0) +
-          Math.min(sharedInterestCount, 25) +
-          (hasLocation ? 10 : 0),
-      };
-    })
-    .sort((left, right) => {
-      if (left.discoveryBucket !== right.discoveryBucket) {
-        return left.discoveryBucket - right.discoveryBucket;
-      }
+  const scored = candidates.map((c) => {
+    // Activity recency (0–300)
+    const diffDays = c.lastActiveAt
+      ? (Date.now() - new Date(c.lastActiveAt).getTime()) / 86400000
+      : 999;
+    const activityScore = diffDays < 1 ? 300 : diffDays < 7 ? 200 : diffDays < 30 ? 100 : 0;
 
-      if (left.discoveryScore !== right.discoveryScore) {
-        return right.discoveryScore - left.discoveryScore;
-      }
+    // Shared interests (0–200)
+    const sharedCount = (c.interests || []).filter((i) => interestSet.has(i)).length;
+    const interestScore = Math.min(sharedCount * 20, 200);
 
-      if (left.sharedInterestCount !== right.sharedInterestCount) {
-        return right.sharedInterestCount - left.sharedInterestCount;
-      }
-
-      if (left.withinDistance !== right.withinDistance) {
-        return Number(right.withinDistance) - Number(left.withinDistance);
-      }
-
-      const updatedAtDifference =
-        new Date(right.updatedAt || 0).getTime() -
-        new Date(left.updatedAt || 0).getTime();
-      if (updatedAtDifference !== 0) {
-        return updatedAtDifference;
-      }
-
-      return String(right._id).localeCompare(String(left._id));
-    });
-}
-
-async function executeDiscoveryQuery({
-  requester,
-  preferredGender,
-  filters,
-  page,
-  limit,
-  excludeSwiped,
-}) {
-  const skip = (page - 1) * limit;
-  const targetCount = skip + limit + 1;
-  const blockedProfileIds = await getBlockedProfileIds(requester._id);
-  const swipedUserIds =
-    requester.swipedUserIds?.map((value) => value.toString()) || [];
-  const requesterLatitude = requester.location?.latitude;
-  const requesterLongitude = requester.location?.longitude;
-  const hasRequesterLocation =
-    typeof requesterLatitude === "number" &&
-    typeof requesterLongitude === "number";
-  const discoveryInterests = Array.isArray(filters.interests)
-    ? filters.interests
-    : [];
-  const expandedAgeRange =
-    filters.ageRange && filters.ageFlex
-      ? {
-          min: Math.max(18, filters.ageRange.min - 2),
-          max: filters.ageRange.max + 2,
-        }
-      : null;
-
-  const runDiscoveryVariant = async ({
-    ageRange,
-    requireSharedInterests,
-    enforceDistanceBoundary,
-    extraExcludedIds,
-    fetchLimit,
-  }) => {
-    const baseMatch = buildBaseDiscoveryMatch({
-      requesterId: requester._id,
-      preferredGender,
-      swipedUserIds,
-      excludeSwiped,
-      dobRange: buildDobRange(ageRange),
-      extraExcludedIds: [...extraExcludedIds, ...blockedProfileIds],
-    });
-
-    if (requireSharedInterests) {
-      baseMatch.interests = { $in: discoveryInterests };
+    // Lifestyle preference match (soft, 0–180 total)
+    let lifestyleScore = 0;
+    if (filters.datingIntentions?.length && c.datingIntentions) {
+      if (filters.datingIntentions.includes(c.datingIntentions)) lifestyleScore += 80;
+    }
+    if (filters.religion?.length && c.religion) {
+      if (filters.religion.includes(c.religion)) lifestyleScore += 40;
+    }
+    if (filters.ethnicity?.length && c.ethnicity) {
+      if (filters.ethnicity.includes(c.ethnicity)) lifestyleScore += 20;
+    }
+    if (filters.drinking?.length && c.drinking) {
+      if (filters.drinking.includes(c.drinking)) lifestyleScore += 20;
+    }
+    if (filters.smoking?.length && c.smoking) {
+      if (filters.smoking.includes(c.smoking)) lifestyleScore += 20;
     }
 
-    if (enforceDistanceBoundary) {
-      baseMatch.locationGeo = {
-        $geoWithin: {
-          $centerSphere: [
-            [requesterLongitude, requesterLatitude],
-            filters.distanceKm / EARTH_RADIUS_KM,
-          ],
-        },
-      };
+    // Distance (0 or distanceWeight)
+    let distanceScore = 0;
+    let distKm = null;
+    if (hasLocation && typeof c.location?.latitude === "number") {
+      distKm = calculateDistanceKm(reqLat, reqLng, c.location.latitude, c.location.longitude);
+      if (distKm !== null && filters.distanceKm && distKm <= filters.distanceKm) {
+        distanceScore = distanceWeight;
+      }
+    }
+
+    // Age (0 or ageWeight)
+    let ageScore = 0;
+    if (filters.ageRange && c.dateOfBirth) {
+      const age = calculateAgeFromDob(c.dateOfBirth);
+      if (age !== null && age >= filters.ageRange.min && age <= filters.ageRange.max) {
+        ageScore = ageWeight;
+      }
     }
 
     return {
-      profiles: rankDiscoveryProfiles({
-        candidates: await UserProfile.find(baseMatch)
-          .select(DISCOVERY_PROFILE_SELECT)
-          .sort({ updatedAt: -1, _id: -1 })
-          .limit(fetchLimit)
-          .lean(),
-        discoveryInterests,
-        hasRequesterLocation,
-        requesterLatitude,
-        requesterLongitude,
-        distanceKm: filters.distanceKm,
-      }),
+      ...c,
+      _discoveryScore: activityScore + interestScore + lifestyleScore + distanceScore + ageScore,
+      _sharedInterestCount: sharedCount,
+      _distanceKm: distKm,
     };
-  };
-
-  const variants = [];
-
-  if (filters.ageRange && discoveryInterests.length) {
-    variants.push({
-      ageRange: filters.ageRange,
-      requireSharedInterests: true,
-      enforceDistanceBoundary: Boolean(filters.distanceKm) && hasRequesterLocation,
-    });
-  }
-
-  if (filters.ageRange) {
-    variants.push({
-      ageRange: filters.ageRange,
-      requireSharedInterests: false,
-      enforceDistanceBoundary: Boolean(filters.distanceKm) && hasRequesterLocation,
-    });
-
-    variants.push({
-      ageRange: filters.ageRange,
-      requireSharedInterests: false,
-      enforceDistanceBoundary: false,
-    });
-  }
-
-  if (expandedAgeRange && discoveryInterests.length) {
-    variants.push({
-      ageRange: expandedAgeRange,
-      requireSharedInterests: true,
-      enforceDistanceBoundary: Boolean(filters.distanceKm) && hasRequesterLocation,
-    });
-  }
-
-  if (expandedAgeRange) {
-    variants.push({
-      ageRange: expandedAgeRange,
-      requireSharedInterests: false,
-      enforceDistanceBoundary: Boolean(filters.distanceKm) && hasRequesterLocation,
-    });
-
-    variants.push({
-      ageRange: expandedAgeRange,
-      requireSharedInterests: false,
-      enforceDistanceBoundary: false,
-    });
-  }
-
-  if (discoveryInterests.length) {
-    variants.push({
-      ageRange: null,
-      requireSharedInterests: true,
-      enforceDistanceBoundary: Boolean(filters.distanceKm) && hasRequesterLocation,
-    });
-
-    variants.push({
-      ageRange: null,
-      requireSharedInterests: true,
-      enforceDistanceBoundary: false,
-    });
-  }
-
-  if (Boolean(filters.distanceKm) && hasRequesterLocation) {
-    variants.push({
-      ageRange: null,
-      requireSharedInterests: false,
-      enforceDistanceBoundary: true,
-    });
-  }
-
-  variants.push({
-    ageRange: null,
-    requireSharedInterests: false,
-    enforceDistanceBoundary: false,
   });
 
-  const combinedProfiles = [];
-  const addedIds = new Set();
-  const tried = new Set();
-  const fetchLimit = buildDiscoveryCandidateLimit(targetCount);
+  scored.sort((a, b) => {
+    if (b._discoveryScore !== a._discoveryScore) return b._discoveryScore - a._discoveryScore;
+    const aTime = a.lastActiveAt ? new Date(a.lastActiveAt).getTime() : 0;
+    const bTime = b.lastActiveAt ? new Date(b.lastActiveAt).getTime() : 0;
+    return bTime - aTime;
+  });
 
-  for (const variant of variants) {
-    const variantKey = JSON.stringify(variant);
-    if (tried.has(variantKey)) continue;
-    tried.add(variantKey);
+  return scored;
+}
 
-    const result = await runDiscoveryVariant({
-      ...variant,
-      extraExcludedIds: Array.from(addedIds),
-      fetchLimit,
-    });
+async function buildDiscoveryDeck({ requester, filters, excludeSwiped = true }) {
+  const userId = requester._id.toString();
 
-    for (const profile of result.profiles) {
-      const profileId = profile?._id?.toString();
-      if (!profileId || addedIds.has(profileId)) continue;
-      addedIds.add(profileId);
-      combinedProfiles.push(profile);
-    }
+  const [blockedIds, swipedIds] = await Promise.all([
+    getBlockedProfileIds(userId),
+    excludeSwiped
+      ? getSwipedProfileIds(userId, requester.swipedUserIds)
+      : Promise.resolve([]),
+  ]);
 
-    if (combinedProfiles.length >= targetCount) {
-      break;
-    }
+  const allExcludedIds = [...new Set([...blockedIds, ...swipedIds])];
+  const preferredGenders = resolvePreferredGender(requester);
+
+  const baseMatch = {
+    _id: {
+      $ne: requester._id,
+      ...(allExcludedIds.length && { $nin: allExcludedIds }),
+    },
+    $or: [
+      { onboardingStage: "COMPLETE" },
+      { onboardingStage: { $exists: false } },
+      { onboardingStage: null },
+      { onboardingStage: "" },
+    ],
+  };
+
+  if (preferredGenders) {
+    baseMatch.gender = { $in: preferredGenders };
   }
 
-  const pagedProfiles = combinedProfiles.slice(skip, skip + limit);
-  const hasMore = combinedProfiles.length > skip + pagedProfiles.length;
+  // Hard filter: only include profiles active in the last 7 days
+  if (filters.activeOnly) {
+    baseMatch.lastActiveAt = { $gte: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000) };
+  }
 
-  return {
-    profiles: pagedProfiles,
-    total: combinedProfiles.length,
-    page,
-    limit,
-    hasMore,
-  };
+  const candidates = await UserProfile.find(baseMatch)
+    .select(DISCOVERY_PROFILE_SELECT)
+    .sort({ lastActiveAt: -1, updatedAt: -1, _id: -1 })
+    .limit(MAX_DISCOVERY_CANDIDATES)
+    .lean();
+
+  return scoreAndRankCandidates({ candidates, requester, filters });
 }
 
 export const getFilteredProfiles = async (req, res) => {
   try {
-    console.log("[FilteredProfiles] Incoming request");
-    console.log("Method:", req.method);
-
     if (!req.user) {
-      console.log("No req.user - unauthorized");
       return res.status(401).json({ success: false, message: "Unauthorized" });
     }
 
     const requester = await UserProfile.findById(req.user.id).lean();
     if (!requester) {
-      console.log("Requester not found in DB");
       return res.status(404).json({ success: false, message: "User not found" });
     }
 
-    const filters = normalizeDiscoveryFilters(
-      req.body?.filters,
-      requester.interests || []
-    );
-    const page = parseDiscoveryNumber(req.body?.page || req.query?.page, 1);
+    const filters = normalizeDiscoveryFilters(req.body?.filters, requester.interests || []);
     const limit = Math.min(
-      parseDiscoveryNumber(
-        req.body?.limit || req.query?.limit,
-        DEFAULT_DISCOVERY_LIMIT
-      ),
+      parseDiscoveryNumber(req.body?.limit || req.query?.limit, DEFAULT_DISCOVERY_LIMIT),
       MAX_DISCOVERY_LIMIT
     );
-    const preferredGender = getPreferredGender(requester.gender);
+    // cursor = _id of the last profile received by the client; null means start of deck
+    const cursor = req.body?.cursor || null;
+    const forceRebuild = Boolean(req.body?.forceRebuild);
+    const filtersKey = JSON.stringify(filters);
+    const userId = requester._id.toString();
 
-    console.log("User:", {
-      id: requester._id.toString(),
-      gender: requester.gender,
-      preferredGender,
-    });
-    console.log("Filters received:", filters);
-    console.log("Discovery page:", page, "limit:", limit);
-
-    let discoveryResult = await executeDiscoveryQuery({
-      requester,
-      preferredGender,
-      filters,
-      page,
-      limit,
-      excludeSwiped: true,
-    });
-
+    let deck = getCachedDeck(userId, filtersKey);
     let recycled = false;
 
-    if (!discoveryResult.total) {
-      recycled = true;
-      console.log("Discovery exhausted; recycling swiped profiles");
-      discoveryResult = await executeDiscoveryQuery({
-        requester,
-        preferredGender,
-        filters,
-        page,
-        limit,
-        excludeSwiped: false,
-      });
+    if (!deck || forceRebuild) {
+      deck = await buildDiscoveryDeck({ requester, filters, excludeSwiped: true });
+      if (deck.length === 0) {
+        recycled = true;
+        deck = await buildDiscoveryDeck({ requester, filters, excludeSwiped: false });
+      }
+      setCachedDeck(userId, deck, filtersKey);
     }
 
-    console.log("Returning profiles:", discoveryResult.profiles.length);
+    // Resolve cursor position — if cursor not found (cache rebuilt), start from top
+    let startIndex = 0;
+    if (cursor) {
+      const cursorIdx = deck.findIndex((p) => p._id.toString() === cursor);
+      if (cursorIdx !== -1) startIndex = cursorIdx + 1;
+    }
+
+    const page = deck.slice(startIndex, startIndex + limit);
+    const hasMore = startIndex + page.length < deck.length;
+    const nextCursor = page.length > 0 ? page[page.length - 1]._id.toString() : null;
 
     return res.status(200).json({
       success: true,
-      profiles: mapProfiles(discoveryResult.profiles),
+      profiles: mapProfiles(page),
       pagination: {
-        page: discoveryResult.page,
-        limit: discoveryResult.limit,
-        total: discoveryResult.total,
-        hasMore: discoveryResult.hasMore,
+        nextCursor,
+        hasMore,
         recycled,
       },
     });
   } catch (error) {
     console.error("FilteredProfiles error:", error);
-    res.status(500).json({
+    return res.status(500).json({
       success: false,
       message: "Failed to fetch filtered profiles",
     });
+  }
+};
+
+export const getDiscoveryPreferences = async (req, res) => {
+  try {
+    if (!req.user) return res.status(401).json({ success: false, message: "Unauthorized" });
+    const user = await UserProfile.findById(req.user.id).select("discoveryPreferences").lean();
+    if (!user) return res.status(404).json({ success: false, message: "User not found" });
+    return res.status(200).json({ success: true, preferences: user.discoveryPreferences || {} });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: "Failed to fetch discovery preferences" });
   }
 };
 
@@ -1080,13 +910,13 @@ function mapProfiles(users) {
     name: user.name,
     username: user.username,
     dateOfBirth: user.dateOfBirth,
+    age: calculateAgeFromDob(user.dateOfBirth),
     gender: user.gender,
     height: user.height,
     interests: user.interests,
     values: user.values,
     prompts: user.prompts || [],
     photos: user.photos || [],
-
     pronouns: user.pronouns || "",
     sexuality: user.sexuality || "",
     work: user.work || "",
@@ -1109,12 +939,9 @@ function mapProfiles(users) {
     smoking: user.smoking || "",
     marijuana: user.marijuana || "",
     drugs: user.drugs || "",
-    sharedInterestCount: user.sharedInterestCount || 0,
-    withinDistance: Boolean(user.withinDistance),
-    distanceKm:
-      typeof user.distanceKm === "number"
-        ? Number(user.distanceKm.toFixed(1))
-        : null,
+    sharedInterestCount: user._sharedInterestCount || 0,
+    distanceKm: typeof user._distanceKm === "number" ? Number(user._distanceKm.toFixed(1)) : null,
+    activityLabel: getActivityLabel(user.lastActiveAt),
   }));
 }
 
@@ -1807,6 +1634,11 @@ export const updateUserProfile = async (req, res) => {
       "smoking",
       "marijuana",
       "drugs",
+      // Discovery
+      "preferredGender",
+      "discoveryPreferences",
+      // Safety / commerce prefs
+      "safetyPreferences",
     ];
 
     // ✅ Allowed onboarding stages (guardrail)
@@ -2030,6 +1862,74 @@ export const updateUserProfile = async (req, res) => {
     return res.status(500).json({
       success: false,
       message: "Internal server error while updating profile.",
+    });
+  }
+};
+
+const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+/**
+ * Links an email address to the logged-in user's account.
+ * Isolated from updateUserProfile since email is a login credential
+ * (uniqueness-enforced) rather than a general profile field.
+ */
+export const addEmail = async (req, res) => {
+  try {
+    const userId = req.user?.id;
+    if (!userId) {
+      return res.status(401).json({
+        success: false,
+        message: "Unauthorized: missing user in token",
+      });
+    }
+
+    const email =
+      typeof req.body?.email === "string" ? req.body.email.trim().toLowerCase() : "";
+
+    if (!email || !EMAIL_REGEX.test(email)) {
+      return res.status(400).json({
+        success: false,
+        message: "A valid email address is required.",
+      });
+    }
+
+    const existing = await UserProfile.findOne({ email, _id: { $ne: userId } });
+    if (existing) {
+      return res.status(409).json({
+        success: false,
+        message: "This email is already linked to another account.",
+      });
+    }
+
+    const user = await UserProfile.findById(userId);
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: "User not found.",
+      });
+    }
+
+    user.email = email;
+    await user.save();
+
+    return res.status(200).json({
+      success: true,
+      message: "Email linked to your account.",
+      data: { email },
+    });
+  } catch (error) {
+    console.error("🔥 [addEmail] ERROR:", error);
+
+    if (error?.code === 11000) {
+      return res.status(409).json({
+        success: false,
+        message: "This email is already linked to another account.",
+      });
+    }
+
+    return res.status(500).json({
+      success: false,
+      message: "Internal server error while linking email.",
     });
   }
 };

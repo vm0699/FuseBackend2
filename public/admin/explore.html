@@ -1,0 +1,851 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Fuse Explore — Admin</title>
+<style>
+  :root {
+    --brand: #ff5864;
+    --brand-soft: #fff0f1;
+    --bg: #faf8f3;
+    --surface: #ffffff;
+    --border: #e8e5e0;
+    --text: #1a1a1a;
+    --text2: #666;
+    --text3: #aaa;
+    --green: #059669;
+    --amber: #d97706;
+    --red: #dc2626;
+    --radius: 12px;
+    --shadow: 0 2px 8px rgba(0,0,0,0.08);
+  }
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: var(--bg); color: var(--text); font-size: 14px; }
+  h1 { font-size: 20px; font-weight: 700; }
+  h2 { font-size: 16px; font-weight: 600; margin-bottom: 12px; }
+  h3 { font-size: 14px; font-weight: 600; }
+  a { color: var(--brand); cursor: pointer; }
+
+  /* ─── Layout ─────────────────────────────────────────────────── */
+  #app { display: flex; flex-direction: column; min-height: 100vh; }
+  #topbar {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 14px 24px; background: var(--surface); border-bottom: 1px solid var(--border);
+    position: sticky; top: 0; z-index: 100;
+    box-shadow: var(--shadow);
+  }
+  #topbar .logo { display: flex; align-items: center; gap: 10px; }
+  #topbar .logo-badge { background: var(--brand); color: #fff; padding: 3px 10px; border-radius: 6px; font-weight: 700; font-size: 12px; }
+  #topbar .meta { font-size: 12px; color: var(--text3); }
+  #main { display: flex; flex: 1; }
+  #sidebar {
+    width: 200px; flex-shrink: 0; background: var(--surface);
+    border-right: 1px solid var(--border); padding: 20px 0;
+    position: sticky; top: 57px; height: calc(100vh - 57px); overflow-y: auto;
+  }
+  #sidebar .nav-item {
+    display: block; padding: 10px 20px; cursor: pointer;
+    font-weight: 500; color: var(--text2); border-left: 3px solid transparent;
+    transition: all 0.15s;
+  }
+  #sidebar .nav-item:hover { background: var(--brand-soft); color: var(--brand); }
+  #sidebar .nav-item.active { color: var(--brand); border-left-color: var(--brand); background: var(--brand-soft); }
+  #sidebar .nav-section { font-size: 11px; font-weight: 700; text-transform: uppercase; color: var(--text3); padding: 16px 20px 6px; letter-spacing: 0.8px; }
+  #content { flex: 1; padding: 28px; max-width: 1000px; }
+
+  /* ─── Auth ───────────────────────────────────────────────────── */
+  #login-screen {
+    display: flex; align-items: center; justify-content: center;
+    min-height: 100vh; background: var(--bg);
+  }
+  .login-card {
+    background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
+    padding: 36px 32px; width: 360px; box-shadow: var(--shadow);
+  }
+  .login-card h1 { margin-bottom: 6px; }
+  .login-card .sub { color: var(--text3); font-size: 13px; margin-bottom: 28px; }
+  .login-card .logo-top { display: flex; align-items: center; gap: 8px; margin-bottom: 20px; }
+  .login-card .logo-mark { background: var(--brand); color: #fff; padding: 4px 10px; border-radius: 8px; font-weight: 700; font-size: 14px; }
+
+  /* ─── Forms ──────────────────────────────────────────────────── */
+  .form-group { margin-bottom: 16px; }
+  label { display: block; font-weight: 500; margin-bottom: 6px; font-size: 13px; }
+  input[type=text], input[type=tel], input[type=number], textarea, select {
+    width: 100%; padding: 10px 12px; border: 1px solid var(--border); border-radius: 8px;
+    font-family: inherit; font-size: 14px; background: var(--bg); color: var(--text);
+    outline: none; transition: border-color 0.15s;
+  }
+  input:focus, textarea:focus, select:focus { border-color: var(--brand); }
+  textarea { resize: vertical; min-height: 80px; }
+  .hint { font-size: 12px; color: var(--text3); margin-top: 4px; }
+
+  /* ─── Buttons ────────────────────────────────────────────────── */
+  .btn {
+    display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+    padding: 10px 18px; border-radius: 8px; font-family: inherit; font-size: 14px;
+    font-weight: 600; cursor: pointer; border: none; transition: opacity 0.15s;
+  }
+  .btn:hover { opacity: 0.85; }
+  .btn:disabled { opacity: 0.45; cursor: not-allowed; }
+  .btn-primary { background: var(--brand); color: #fff; }
+  .btn-secondary { background: var(--surface); color: var(--text); border: 1px solid var(--border); }
+  .btn-sm { padding: 6px 12px; font-size: 12px; }
+  .btn-danger { background: var(--red); color: #fff; }
+  .btn-success { background: var(--green); color: #fff; }
+  .btn-amber { background: var(--amber); color: #fff; }
+  .btn-full { width: 100%; margin-top: 4px; }
+
+  /* ─── Cards / tables ─────────────────────────────────────────── */
+  .card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 20px; margin-bottom: 14px; }
+  .card-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; margin-bottom: 10px; }
+  .card-title { font-weight: 600; font-size: 15px; }
+  .card-sub { font-size: 12px; color: var(--text3); margin-top: 2px; }
+  .card-meta { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0; }
+  .meta-chip { background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 2px 8px; font-size: 12px; color: var(--text2); }
+  .card-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border); }
+  .notes-area { margin-top: 10px; }
+
+  /* ─── Status badge ───────────────────────────────────────────── */
+  .badge { padding: 3px 8px; border-radius: 6px; font-size: 11px; font-weight: 600; border: 1px solid; display: inline-block; white-space: nowrap; }
+  .badge-green { color: var(--green); border-color: var(--green); }
+  .badge-amber { color: var(--amber); border-color: var(--amber); }
+  .badge-red { color: var(--red); border-color: var(--red); }
+  .badge-gray { color: var(--text3); border-color: var(--border); }
+
+  /* ─── Filter bar ─────────────────────────────────────────────── */
+  .filter-bar { display: flex; align-items: center; gap: 10px; margin-bottom: 20px; flex-wrap: wrap; }
+  .filter-bar select { width: auto; padding: 8px 10px; }
+  .filter-bar .count { font-size: 13px; color: var(--text3); }
+
+  /* ─── Message ────────────────────────────────────────────────── */
+  #toast {
+    position: fixed; bottom: 24px; right: 24px; background: var(--text); color: #fff;
+    padding: 12px 20px; border-radius: 10px; font-size: 14px; font-weight: 500;
+    opacity: 0; transition: opacity 0.3s; pointer-events: none; z-index: 9999;
+    max-width: 320px;
+  }
+  #toast.show { opacity: 1; }
+  #toast.error { background: var(--red); }
+
+  /* ─── Util ───────────────────────────────────────────────────── */
+  .empty { text-align: center; padding: 48px 0; color: var(--text3); }
+  .loading { text-align: center; padding: 48px 0; color: var(--text3); }
+  .section-title { margin-bottom: 16px; }
+  .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .divider { border: none; border-top: 1px solid var(--border); margin: 20px 0; }
+
+  @media (max-width: 700px) {
+    #sidebar { display: none; }
+    #content { padding: 16px; }
+    .two-col { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+
+<!-- ─── Toast ─────────────────────────────────────────────────────────────── -->
+<div id="toast"></div>
+
+<!-- ─── App container ────────────────────────────────────────────────────── -->
+<div id="app" style="display:none">
+  <div id="topbar">
+    <div class="logo">
+      <span class="logo-badge">FUSE</span>
+      <span style="font-weight:600">Explore Admin</span>
+    </div>
+    <div style="display:flex;gap:12px;align-items:center">
+      <span class="meta" id="admin-label"></span>
+      <button class="btn btn-secondary btn-sm" onclick="logout()">Sign out</button>
+    </div>
+  </div>
+  <div id="main">
+    <nav id="sidebar">
+      <div class="nav-section">Orders</div>
+      <span class="nav-item" data-tab="bookings" onclick="switchTab('bookings')">📅 Bookings</span>
+      <span class="nav-item" data-tab="tickets" onclick="switchTab('tickets')">🎟 Tickets</span>
+      <span class="nav-item" data-tab="premium" onclick="switchTab('premium')">👑 Premium</span>
+      <div class="nav-section">Content</div>
+      <span class="nav-item" data-tab="venues" onclick="switchTab('venues')">🏠 Venues</span>
+      <span class="nav-item" data-tab="events" onclick="switchTab('events')">🎉 Events</span>
+    </nav>
+    <div id="content">
+      <div id="tab-bookings" class="tab-panel"></div>
+      <div id="tab-tickets" class="tab-panel" style="display:none"></div>
+      <div id="tab-premium" class="tab-panel" style="display:none"></div>
+      <div id="tab-venues" class="tab-panel" style="display:none"></div>
+      <div id="tab-events" class="tab-panel" style="display:none"></div>
+    </div>
+  </div>
+</div>
+
+<!-- ─── Login screen ─────────────────────────────────────────────────────── -->
+<div id="login-screen">
+  <div class="login-card">
+    <div class="logo-top">
+      <span class="logo-mark">FUSE</span>
+      <span style="font-weight:600;font-size:16px">Explore Admin</span>
+    </div>
+    <h1>Sign in</h1>
+    <p class="sub">Admin access only · phone OTP required</p>
+    <div id="otp-step-1">
+      <div class="form-group">
+        <label>Phone number (with country code)</label>
+        <input type="tel" id="phone-input" placeholder="+91 98765 43210" />
+      </div>
+      <button class="btn btn-primary btn-full" id="send-otp-btn" onclick="sendOtp()">Send OTP</button>
+    </div>
+    <div id="otp-step-2" style="display:none">
+      <div class="form-group">
+        <label>OTP code</label>
+        <input type="text" id="otp-input" placeholder="123456" maxlength="6" />
+        <div class="hint">Sent to <span id="otp-phone-display"></span></div>
+      </div>
+      <button class="btn btn-primary btn-full" id="verify-otp-btn" onclick="verifyOtp()">Verify OTP</button>
+      <button class="btn btn-secondary btn-full" style="margin-top:8px" onclick="resetLogin()">Back</button>
+    </div>
+  </div>
+</div>
+
+<script>
+// ─── State ───────────────────────────────────────────────────────────────────
+let TOKEN = localStorage.getItem("fuse_admin_token") || null;
+let USER_INFO = null;
+let currentTab = "bookings";
+const API = window.location.origin;
+
+// ─── Init ─────────────────────────────────────────────────────────────────────
+window.onload = async () => {
+  if (TOKEN) {
+    const ok = await checkToken();
+    if (ok) return showApp();
+    TOKEN = null;
+    localStorage.removeItem("fuse_admin_token");
+  }
+};
+
+async function checkToken() {
+  try {
+    const r = await apiFetch("/api/profile");
+    if (!r.ok) return false;
+    const d = await r.json();
+    USER_INFO = d.data;
+    document.getElementById("admin-label").textContent = USER_INFO?.name || USER_INFO?.phoneNumber || "";
+    return true;
+  } catch { return false; }
+}
+
+// ─── Auth ─────────────────────────────────────────────────────────────────────
+async function sendOtp() {
+  const phone = document.getElementById("phone-input").value.trim();
+  if (!phone) return toast("Enter your phone number", true);
+  setBtn("send-otp-btn", "Sending...", true);
+  try {
+    const r = await fetch(`${API}/api/auth/verifyPhoneNumber`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ phoneNumber: phone })
+    });
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.message || "Failed");
+    document.getElementById("otp-phone-display").textContent = phone;
+    document.getElementById("otp-step-1").style.display = "none";
+    document.getElementById("otp-step-2").style.display = "";
+  } catch (e) { toast(e.message, true); }
+  setBtn("send-otp-btn", "Send OTP", false);
+}
+
+async function verifyOtp() {
+  const phone = document.getElementById("phone-input").value.trim();
+  const code = document.getElementById("otp-input").value.trim();
+  if (!code) return toast("Enter the OTP", true);
+  setBtn("verify-otp-btn", "Verifying...", true);
+  try {
+    const r = await fetch(`${API}/api/auth/verifyCode`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ phoneNumber: phone, code })
+    });
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.message || "Invalid OTP");
+    TOKEN = d.data?.token;
+    if (!TOKEN) throw new Error("No token received");
+    localStorage.setItem("fuse_admin_token", TOKEN);
+    const ok = await checkToken();
+    if (!ok) { toast("Not an admin account", true); TOKEN = null; localStorage.removeItem("fuse_admin_token"); return; }
+    // Test admin access
+    const ar = await apiFetch("/api/admin/explore/bookings?limit=1");
+    if (ar.status === 403) { toast("This account doesn't have admin access", true); TOKEN = null; localStorage.removeItem("fuse_admin_token"); return; }
+    showApp();
+  } catch (e) { toast(e.message, true); }
+  setBtn("verify-otp-btn", "Verify OTP", false);
+}
+
+function resetLogin() {
+  document.getElementById("otp-step-1").style.display = "";
+  document.getElementById("otp-step-2").style.display = "none";
+  document.getElementById("otp-input").value = "";
+}
+
+function logout() {
+  TOKEN = null; localStorage.removeItem("fuse_admin_token");
+  location.reload();
+}
+
+// ─── Shell ────────────────────────────────────────────────────────────────────
+function showApp() {
+  document.getElementById("login-screen").style.display = "none";
+  document.getElementById("app").style.display = "flex";
+  switchTab("bookings");
+}
+
+function switchTab(tab) {
+  currentTab = tab;
+  document.querySelectorAll(".tab-panel").forEach(p => p.style.display = "none");
+  document.getElementById("tab-" + tab).style.display = "";
+  document.querySelectorAll(".nav-item").forEach(n => n.classList.remove("active"));
+  document.querySelector(`.nav-item[data-tab="${tab}"]`).classList.add("active");
+  loadTab(tab);
+}
+
+function loadTab(tab) {
+  switch(tab) {
+    case "bookings": loadBookings(); break;
+    case "tickets":  loadTickets();  break;
+    case "premium":  loadPremium();  break;
+    case "venues":   loadVenues();   break;
+    case "events":   loadEvents();   break;
+  }
+}
+
+// ─── API helpers ──────────────────────────────────────────────────────────────
+function apiFetch(path, opts = {}) {
+  return fetch(`${API}${path}`, {
+    ...opts,
+    headers: { "Content-Type": "application/json", "Authorization": `Bearer ${TOKEN}`, ...(opts.headers || {}) }
+  });
+}
+async function apiGet(path) {
+  const r = await apiFetch(path); const d = await r.json();
+  if (!r.ok) throw new Error(d.message || r.status); return d;
+}
+async function apiPost(path, body) {
+  const r = await apiFetch(path, { method: "POST", body: JSON.stringify(body) }); const d = await r.json();
+  if (!r.ok) throw new Error(d.message || r.status); return d;
+}
+async function apiPatch(path, body) {
+  const r = await apiFetch(path, { method: "PATCH", body: JSON.stringify(body) }); const d = await r.json();
+  if (!r.ok) throw new Error(d.message || r.status); return d;
+}
+
+// ─── Utilities ────────────────────────────────────────────────────────────────
+function toast(msg, err = false) {
+  const t = document.getElementById("toast");
+  t.textContent = msg; t.className = "show" + (err ? " error" : "");
+  setTimeout(() => t.className = "", 3500);
+}
+function setBtn(id, label, disabled) {
+  const b = document.getElementById(id); if (!b) return;
+  b.textContent = label; b.disabled = disabled;
+}
+function fmtDate(s) {
+  if (!s) return "—";
+  return new Date(s).toLocaleString("en-IN", { day:"numeric", month:"short", year:"numeric", hour:"2-digit", minute:"2-digit" });
+}
+function statusBadge(s) {
+  const greenSet = ["CONFIRMED","FULFILLED","ACCEPTED"];
+  const amberSet = ["CREATED","ADMIN_REVIEW","INVITE_PENDING","PROCESSING","QUOTED"];
+  const redSet   = ["CANCELLED","REFUND_REQUIRED","DECLINED","EXPIRED"];
+  const cls = greenSet.includes(s) ? "badge-green" : amberSet.includes(s) ? "badge-amber" : redSet.includes(s) ? "badge-red" : "badge-gray";
+  return `<span class="badge ${cls}">${s}</span>`;
+}
+function el(id) { return document.getElementById(id); }
+
+// ─── BOOKINGS ─────────────────────────────────────────────────────────────────
+let bookingsFilter = "";
+async function loadBookings(filter) {
+  if (filter !== undefined) bookingsFilter = filter;
+  const panel = el("tab-bookings");
+  panel.innerHTML = `
+    <h2 class="section-title">Bookings</h2>
+    <div class="filter-bar">
+      <select onchange="loadBookings(this.value)">
+        <option value="">All statuses</option>
+        <option value="CREATED">Created</option>
+        <option value="INVITE_PENDING">Invite pending</option>
+        <option value="CONFIRMED">Confirmed</option>
+        <option value="ADMIN_REVIEW">Admin review</option>
+        <option value="FULFILLED">Fulfilled</option>
+        <option value="CANCELLED">Cancelled</option>
+        <option value="REFUND_REQUIRED">Refund required</option>
+        <option value="REFUNDED">Refunded</option>
+      </select>
+      <button class="btn btn-secondary btn-sm" onclick="loadBookings()">↻ Refresh</button>
+    </div>
+    <div id="bookings-list"><div class="loading">Loading…</div></div>`;
+  try {
+    const qs = bookingsFilter ? `?status=${bookingsFilter}` : "";
+    const data = await apiGet(`/api/admin/explore/bookings${qs}`);
+    const list = data.bookings || [];
+    const container = el("bookings-list");
+    if (!list.length) { container.innerHTML = `<div class="empty">No bookings found</div>`; return; }
+    container.innerHTML = list.map(b => bookingCard(b)).join("");
+  } catch (e) { el("bookings-list").innerHTML = `<div class="empty" style="color:var(--red)">${e.message}</div>`; }
+}
+function bookingCard(b) {
+  const venue = b.venueSnapshot || {};
+  return `<div class="card" id="booking-${b._id}">
+    <div class="card-header">
+      <div>
+        <div class="card-title">${venue.name || "—"} · ${venue.area || ""}</div>
+        <div class="card-sub">${b.bookingCode} · ${fmtDate(b.bookingDate)}</div>
+      </div>
+      ${statusBadge(b.status)}
+    </div>
+    <div class="card-meta">
+      <span class="meta-chip">Party: ${b.partySize}</span>
+      <span class="meta-chip">Fee: ₹${b.bookingFee}</span>
+      ${b.userId ? `<span class="meta-chip">User: ${b.userId.name || b.userId.phoneNumber || b.userId._id}</span>` : ""}
+      ${b.inviteStatus ? `<span class="meta-chip">Invite: ${b.inviteStatus}</span>` : ""}
+    </div>
+    ${b.adminNotes ? `<div style="font-size:12px;color:var(--text2);margin:6px 0">📝 ${b.adminNotes}</div>` : ""}
+    <div class="notes-area">
+      <textarea id="bnote-${b._id}" placeholder="Admin notes…" rows="2" style="width:100%">${b.adminNotes || ""}</textarea>
+    </div>
+    <div class="card-actions">
+      <button class="btn btn-sm btn-secondary" onclick="saveBookingNotes('${b._id}')">Save notes</button>
+      <button class="btn btn-sm btn-success" onclick="bookingAction('${b._id}','CONFIRM')">Confirm</button>
+      <button class="btn btn-sm btn-primary" onclick="bookingAction('${b._id}','MARK_FULFILLED')">Fulfill</button>
+      <button class="btn btn-sm btn-amber" onclick="bookingAction('${b._id}','MARK_REFUND_REQUIRED')">Refund required</button>
+      <button class="btn btn-sm btn-secondary" onclick="bookingAction('${b._id}','MARK_REFUNDED')">Refunded</button>
+      <button class="btn btn-sm btn-danger" onclick="bookingAction('${b._id}','CANCEL')">Cancel</button>
+    </div>
+  </div>`;
+}
+async function bookingAction(id, action) {
+  const note = el(`bnote-${id}`)?.value || undefined;
+  try { await apiPatch(`/api/admin/explore/bookings/${id}/status`, { action, note }); toast("Updated ✓"); loadBookings(); }
+  catch (e) { toast(e.message, true); }
+}
+async function saveBookingNotes(id) {
+  const notes = el(`bnote-${id}`)?.value || "";
+  try { await apiPatch(`/api/admin/explore/bookings/${id}/notes`, { notes }); toast("Notes saved ✓"); }
+  catch (e) { toast(e.message, true); }
+}
+
+// ─── TICKETS ──────────────────────────────────────────────────────────────────
+let ticketsFilter = "";
+async function loadTickets(filter) {
+  if (filter !== undefined) ticketsFilter = filter;
+  const panel = el("tab-tickets");
+  panel.innerHTML = `
+    <h2 class="section-title">Ticket Orders</h2>
+    <div class="filter-bar">
+      <select onchange="loadTickets(this.value)">
+        <option value="">All statuses</option>
+        <option value="CREATED">Created</option>
+        <option value="CONFIRMED">Confirmed</option>
+        <option value="ADMIN_REVIEW">Admin review</option>
+        <option value="FULFILLED">Fulfilled</option>
+        <option value="CANCELLED">Cancelled</option>
+        <option value="REFUND_REQUIRED">Refund required</option>
+        <option value="REFUNDED">Refunded</option>
+      </select>
+      <button class="btn btn-secondary btn-sm" onclick="loadTickets()">↻ Refresh</button>
+    </div>
+    <div id="tickets-list"><div class="loading">Loading…</div></div>`;
+  try {
+    const qs = ticketsFilter ? `?status=${ticketsFilter}` : "";
+    const data = await apiGet(`/api/admin/explore/tickets${qs}`);
+    const list = data.orders || [];
+    const container = el("tickets-list");
+    if (!list.length) { container.innerHTML = `<div class="empty">No ticket orders found</div>`; return; }
+    container.innerHTML = list.map(o => ticketCard(o)).join("");
+  } catch (e) { el("tickets-list").innerHTML = `<div class="empty" style="color:var(--red)">${e.message}</div>`; }
+}
+function ticketCard(o) {
+  return `<div class="card" id="ticket-${o._id}">
+    <div class="card-header">
+      <div>
+        <div class="card-title">${o.eventTitle || "—"}</div>
+        <div class="card-sub">${o.ticketCode} · ${fmtDate(o.eventDate)}</div>
+      </div>
+      ${statusBadge(o.status)}
+    </div>
+    <div class="card-meta">
+      <span class="meta-chip">Qty: ${o.quantity}</span>
+      <span class="meta-chip">Total: ₹${o.totalAmount}</span>
+      ${o.userId ? `<span class="meta-chip">User: ${o.userId.name || o.userId.phoneNumber || o.userId._id}</span>` : ""}
+      ${o.ticketReference ? `<span class="meta-chip">Ref: ${o.ticketReference}</span>` : ""}
+    </div>
+    ${o.adminNotes ? `<div style="font-size:12px;color:var(--text2);margin:6px 0">📝 ${o.adminNotes}</div>` : ""}
+    <div class="notes-area">
+      <textarea id="tnote-${o._id}" placeholder="Admin notes / ticket reference…" rows="2">${o.adminNotes || ""}</textarea>
+    </div>
+    <div class="form-group" style="margin-top:8px">
+      <label>Ticket reference</label>
+      <input type="text" id="tref-${o._id}" value="${o.ticketReference || ""}" placeholder="e.g. TICKET-ABC123" />
+    </div>
+    <div class="form-group">
+      <label>Ticket attachment URL (optional)</label>
+      <input type="text" id="tattach-${o._id}" value="${o.ticketAttachment || ""}" placeholder="https://…" />
+    </div>
+    <div class="card-actions">
+      <button class="btn btn-sm btn-secondary" onclick="saveTicketNotes('${o._id}')">Save notes + ref</button>
+      <button class="btn btn-sm btn-success" onclick="ticketAction('${o._id}','CONFIRM')">Confirm</button>
+      <button class="btn btn-sm btn-primary" onclick="ticketAction('${o._id}','MARK_FULFILLED')">Mark fulfilled</button>
+      <button class="btn btn-sm btn-amber" onclick="ticketAction('${o._id}','MARK_REFUND_REQUIRED')">Refund required</button>
+      <button class="btn btn-sm btn-secondary" onclick="ticketAction('${o._id}','MARK_REFUNDED')">Refunded</button>
+      <button class="btn btn-sm btn-danger" onclick="ticketAction('${o._id}','CANCEL')">Cancel</button>
+    </div>
+  </div>`;
+}
+async function ticketAction(id, action) {
+  const note = el(`tnote-${id}`)?.value || undefined;
+  try { await apiPatch(`/api/admin/explore/tickets/${id}/status`, { action, note }); toast("Updated ✓"); loadTickets(); }
+  catch (e) { toast(e.message, true); }
+}
+async function saveTicketNotes(id) {
+  const notes = el(`tnote-${id}`)?.value || "";
+  const ticketReference = el(`tref-${id}`)?.value || "";
+  const ticketAttachment = el(`tattach-${id}`)?.value || "";
+  try { await apiPatch(`/api/admin/explore/tickets/${id}/notes`, { notes, ticketReference, ticketAttachment }); toast("Saved ✓"); }
+  catch (e) { toast(e.message, true); }
+}
+
+// ─── PREMIUM ──────────────────────────────────────────────────────────────────
+let premiumFilter = "";
+async function loadPremium(filter) {
+  if (filter !== undefined) premiumFilter = filter;
+  const panel = el("tab-premium");
+  panel.innerHTML = `
+    <h2 class="section-title">Premium Requests</h2>
+    <div class="filter-bar">
+      <select onchange="loadPremium(this.value)">
+        <option value="">All statuses</option>
+        <option value="SUBMITTED">Submitted</option>
+        <option value="QUOTED">Quoted</option>
+        <option value="PAYMENT_PENDING">Payment pending</option>
+        <option value="CONFIRMED">Confirmed</option>
+        <option value="FULFILLED">Fulfilled</option>
+        <option value="CANCELLED">Cancelled</option>
+      </select>
+      <button class="btn btn-secondary btn-sm" onclick="loadPremium()">↻ Refresh</button>
+    </div>
+    <div id="premium-list"><div class="loading">Loading…</div></div>`;
+  try {
+    const qs = premiumFilter ? `?status=${premiumFilter}` : "";
+    const data = await apiGet(`/api/admin/explore/premium${qs}`);
+    const list = data.requests || [];
+    const container = el("premium-list");
+    if (!list.length) { container.innerHTML = `<div class="empty">No requests found</div>`; return; }
+    container.innerHTML = list.map(r => premiumCard(r)).join("");
+  } catch (e) { el("premium-list").innerHTML = `<div class="empty" style="color:var(--red)">${e.message}</div>`; }
+}
+function premiumCard(r) {
+  return `<div class="card" id="premium-${r._id}">
+    <div class="card-header">
+      <div>
+        <div class="card-title">${r.occasion || "—"}</div>
+        <div class="card-sub">Budget: ₹${r.budget} · ${fmtDate(r.createdAt)}</div>
+      </div>
+      ${statusBadge(r.status)}
+    </div>
+    <div class="card-meta">
+      ${r.notes ? `<span class="meta-chip">Notes: ${r.notes.substring(0,60)}</span>` : ""}
+      ${r.quotedAmount ? `<span class="meta-chip">Quoted: ₹${r.quotedAmount}</span>` : ""}
+      ${r.userId ? `<span class="meta-chip">User: ${r.userId.name || r.userId.phoneNumber || r.userId._id}</span>` : ""}
+    </div>
+    <div class="form-group" style="margin-top:8px">
+      <label>Quote amount (₹)</label>
+      <input type="number" id="pquote-${r._id}" value="${r.quotedAmount || ""}" placeholder="e.g. 5000" />
+    </div>
+    <div class="form-group">
+      <label>Quote message to user</label>
+      <textarea id="pmsg-${r._id}" placeholder="We can plan…" rows="2">${r.adminNotes || ""}</textarea>
+    </div>
+    <div class="card-actions">
+      <button class="btn btn-sm btn-secondary" onclick="premiumAction('${r._id}','CONTACT')">Mark contacted</button>
+      <button class="btn btn-sm btn-primary" onclick="sendQuote('${r._id}')">Send quote</button>
+      <button class="btn btn-sm btn-success" onclick="premiumAction('${r._id}','CONFIRM')">Confirm</button>
+      <button class="btn btn-sm btn-amber" onclick="premiumAction('${r._id}','MARK_FULFILLED')">Fulfilled</button>
+      <button class="btn btn-sm btn-danger" onclick="premiumAction('${r._id}','CANCEL')">Cancel</button>
+    </div>
+  </div>`;
+}
+async function sendQuote(id) {
+  const quotedAmount = Number(el(`pquote-${id}`)?.value);
+  const note = el(`pmsg-${id}`)?.value || "";
+  if (!quotedAmount) return toast("Enter a quote amount", true);
+  try { await apiPatch(`/api/admin/explore/premium/${id}/quote`, { quotedAmount, note }); toast("Quote sent ✓"); loadPremium(); }
+  catch (e) { toast(e.message, true); }
+}
+async function premiumAction(id, action) {
+  const note = el(`pmsg-${id}`)?.value || undefined;
+  try { await apiPatch(`/api/admin/explore/premium/${id}/status`, { action, note }); toast("Updated ✓"); loadPremium(); }
+  catch (e) { toast(e.message, true); }
+}
+
+// ─── VENUES ───────────────────────────────────────────────────────────────────
+async function loadVenues() {
+  const panel = el("tab-venues");
+  panel.innerHTML = `
+    <h2 class="section-title">Venues</h2>
+    <button class="btn btn-primary btn-sm" style="margin-bottom:16px" onclick="showVenueForm()">+ Add venue</button>
+    <div id="venue-form-wrap"></div>
+    <div id="venues-list"><div class="loading">Loading…</div></div>`;
+  try {
+    const data = await apiGet("/api/explore/venues?limit=100");
+    const list = data.venues || [];
+    const container = el("venues-list");
+    if (!list.length) { container.innerHTML = `<div class="empty">No venues yet</div>`; return; }
+    container.innerHTML = list.map(v => venueCard(v)).join("");
+  } catch (e) { el("venues-list").innerHTML = `<div class="empty" style="color:var(--red)">${e.message}</div>`; }
+}
+function venueCard(v) {
+  return `<div class="card">
+    <div class="card-header">
+      <div>
+        <div class="card-title">${v.name}</div>
+        <div class="card-sub">${v.area}, ${v.city} · ${v.category}</div>
+      </div>
+      <div>${v.isFuseVerified ? '<span class="badge badge-green">Verified</span>' : '<span class="badge badge-gray">Unverified</span>'}</div>
+    </div>
+    <div class="card-meta">
+      ${v.cuisine ? `<span class="meta-chip">${v.cuisine}</span>` : ""}
+      ${v.priceRange ? `<span class="meta-chip">${v.priceRange}</span>` : ""}
+      <span class="meta-chip">Fee: ₹${v.bookingFee}</span>
+      ${v.dinerDiscountPct > 0 ? `<span class="meta-chip">Discount: ${v.dinerDiscountPct}%</span>` : ""}
+    </div>
+    <div class="card-actions">
+      <button class="btn btn-sm btn-secondary" onclick="showVenueForm('${v._id}')">Edit</button>
+    </div>
+  </div>`;
+}
+function showVenueForm(id) {
+  el("venue-form-wrap").innerHTML = venueForm(id);
+  if (id) prefillVenueForm(id);
+}
+function venueForm(id) {
+  return `<div class="card" style="border-color:var(--brand)">
+    <h3>${id ? "Edit venue" : "Add venue"}</h3>
+    <hr class="divider" />
+    <div class="two-col">
+      <div class="form-group"><label>Name*</label><input id="vf-name" type="text" /></div>
+      <div class="form-group"><label>Category*</label>
+        <select id="vf-category">
+          <option value="cafe">Cafe</option><option value="restaurant">Restaurant</option>
+          <option value="rooftop">Rooftop</option><option value="lounge">Lounge</option>
+          <option value="fine-dining">Fine dining</option>
+        </select>
+      </div>
+      <div class="form-group"><label>Area*</label><input id="vf-area" type="text" placeholder="Anna Nagar" /></div>
+      <div class="form-group"><label>City</label><input id="vf-city" type="text" value="Chennai" /></div>
+      <div class="form-group"><label>Cuisine</label><input id="vf-cuisine" type="text" /></div>
+      <div class="form-group"><label>Price range</label>
+        <select id="vf-priceRange"><option>₹</option><option>₹₹</option><option>₹₹₹</option><option>₹₹₹₹</option></select>
+      </div>
+      <div class="form-group"><label>Booking fee (₹)*</label><input id="vf-bookingFee" type="number" value="0" /></div>
+      <div class="form-group"><label>Venue commission %</label><input id="vf-venueCommissionPct" type="number" value="0" /></div>
+      <div class="form-group"><label>Diner discount %</label><input id="vf-dinerDiscountPct" type="number" value="0" /></div>
+      <div class="form-group"><label>Max party size</label><input id="vf-maxPartySize" type="number" value="6" /></div>
+    </div>
+    <div class="form-group"><label>Opening hours</label><input id="vf-openingHours" type="text" placeholder="Mon-Sun 10AM-10PM" /></div>
+    <div class="form-group"><label>Address (full, admin-only until confirmed)</label><input id="vf-address" type="text" /></div>
+    <div class="form-group"><label>Images (URLs, comma-separated)</label><textarea id="vf-images" rows="2"></textarea></div>
+    <div class="form-group"><label>Tags (comma-separated)</label><input id="vf-tags" type="text" placeholder="coffee,quiet,wifi" /></div>
+    <div class="form-group"><label>Description</label><textarea id="vf-description" rows="3"></textarea></div>
+    <div class="form-group"><label>
+      <input type="checkbox" id="vf-isFuseVerified" checked /> Fuse verified
+    </label></div>
+    <div class="form-group"><label>
+      <input type="checkbox" id="vf-isActive" checked /> Active (shown to users)
+    </label></div>
+    <div class="card-actions">
+      <button class="btn btn-primary" onclick="saveVenue(${id ? `'${id}'` : 'null'})">Save venue</button>
+      <button class="btn btn-secondary" onclick="el('venue-form-wrap').innerHTML=''">Cancel</button>
+    </div>
+  </div>`;
+}
+async function prefillVenueForm(id) {
+  try {
+    const d = await apiGet(`/api/explore/venues/${id}`);
+    const v = d.venue;
+    el("vf-name").value = v.name || "";
+    el("vf-category").value = v.category || "cafe";
+    el("vf-area").value = v.area || "";
+    el("vf-city").value = v.city || "Chennai";
+    el("vf-cuisine").value = v.cuisine || "";
+    el("vf-priceRange").value = v.priceRange || "₹₹";
+    el("vf-bookingFee").value = v.bookingFee || 0;
+    el("vf-venueCommissionPct").value = v.venueCommissionPct || 0;
+    el("vf-dinerDiscountPct").value = v.dinerDiscountPct || 0;
+    el("vf-maxPartySize").value = v.maxPartySize || 6;
+    el("vf-openingHours").value = v.openingHours || "";
+    el("vf-images").value = (v.images || []).join(", ");
+    el("vf-tags").value = (v.tags || []).join(", ");
+    el("vf-description").value = v.description || "";
+    el("vf-isFuseVerified").checked = v.isFuseVerified !== false;
+    el("vf-isActive").checked = v.isActive !== false;
+  } catch (e) { toast(e.message, true); }
+}
+async function saveVenue(id) {
+  const payload = {
+    name: el("vf-name").value.trim(),
+    category: el("vf-category").value,
+    area: el("vf-area").value.trim(),
+    city: el("vf-city").value.trim() || "Chennai",
+    cuisine: el("vf-cuisine").value.trim(),
+    priceRange: el("vf-priceRange").value,
+    bookingFee: Number(el("vf-bookingFee").value) || 0,
+    venueCommissionPct: Number(el("vf-venueCommissionPct").value) || 0,
+    dinerDiscountPct: Number(el("vf-dinerDiscountPct").value) || 0,
+    maxPartySize: Number(el("vf-maxPartySize").value) || 6,
+    openingHours: el("vf-openingHours").value.trim(),
+    address: el("vf-address").value.trim(),
+    images: el("vf-images").value.split(",").map(s=>s.trim()).filter(Boolean),
+    tags: el("vf-tags").value.split(",").map(s=>s.trim()).filter(Boolean),
+    description: el("vf-description").value.trim(),
+    isFuseVerified: el("vf-isFuseVerified").checked,
+    isActive: el("vf-isActive").checked,
+  };
+  if (!payload.name || !payload.category || !payload.area) return toast("Name, category, area required", true);
+  try {
+    if (id) await apiPatch(`/api/admin/explore/venues/${id}`, payload);
+    else await apiPost("/api/admin/explore/venues", payload);
+    toast("Venue saved ✓"); el("venue-form-wrap").innerHTML = ""; loadVenues();
+  } catch (e) { toast(e.message, true); }
+}
+
+// ─── EVENTS ───────────────────────────────────────────────────────────────────
+async function loadEvents() {
+  const panel = el("tab-events");
+  panel.innerHTML = `
+    <h2 class="section-title">Events</h2>
+    <button class="btn btn-primary btn-sm" style="margin-bottom:16px" onclick="showEventForm()">+ Add event</button>
+    <div id="event-form-wrap"></div>
+    <div id="events-list"><div class="loading">Loading…</div></div>`;
+  try {
+    const data = await apiGet("/api/explore/events?limit=100");
+    const list = data.events || [];
+    const container = el("events-list");
+    if (!list.length) { container.innerHTML = `<div class="empty">No events yet</div>`; return; }
+    container.innerHTML = list.map(e => eventCardAdmin(e)).join("");
+  } catch (e) { el("events-list").innerHTML = `<div class="empty" style="color:var(--red)">${e.message}</div>`; }
+}
+function eventCardAdmin(e) {
+  return `<div class="card">
+    <div class="card-header">
+      <div>
+        <div class="card-title">${e.title}</div>
+        <div class="card-sub">${fmtDate(e.eventDate)} · ${e.venue || "TBD"}</div>
+      </div>
+      <div>
+        ${e.isFeatured ? '<span class="badge badge-amber">Featured</span>' : ""}
+        ${e.isSoldOut ? '<span class="badge badge-red">Sold out</span>' : '<span class="badge badge-green">Active</span>'}
+      </div>
+    </div>
+    <div class="card-meta">
+      <span class="meta-chip">₹${e.ticketPrice}</span>
+      ${e.availableSlots != null ? `<span class="meta-chip">Slots: ${e.availableSlots}</span>` : ""}
+      ${e.savingsAmount > 0 ? `<span class="meta-chip">Save ₹${e.savingsAmount}</span>` : ""}
+    </div>
+    <div class="card-actions">
+      <button class="btn btn-sm btn-secondary" onclick="showEventForm('${e._id}')">Edit</button>
+    </div>
+  </div>`;
+}
+function showEventForm(id) {
+  el("event-form-wrap").innerHTML = eventForm(id);
+  if (id) prefillEventForm(id);
+}
+function eventForm(id) {
+  return `<div class="card" style="border-color:var(--brand)">
+    <h3>${id ? "Edit event" : "Add event"}</h3>
+    <hr class="divider" />
+    <div class="two-col">
+      <div class="form-group"><label>Title*</label><input id="ef-title" type="text" /></div>
+      <div class="form-group"><label>Category</label><input id="ef-category" type="text" placeholder="comedy,music,party" /></div>
+      <div class="form-group"><label>Event date & time*</label><input id="ef-eventDate" type="datetime-local" /></div>
+      <div class="form-group"><label>Event end date/time</label><input id="ef-eventEndDate" type="datetime-local" /></div>
+      <div class="form-group"><label>Venue name</label><input id="ef-venue" type="text" /></div>
+      <div class="form-group"><label>City</label><input id="ef-city" type="text" value="Chennai" /></div>
+      <div class="form-group"><label>Ticket price (₹)*</label><input id="ef-ticketPrice" type="number" /></div>
+      <div class="form-group"><label>Original price (for savings display)</label><input id="ef-originalPrice" type="number" /></div>
+      <div class="form-group"><label>Available slots</label><input id="ef-availableSlots" type="number" /></div>
+      <div class="form-group"><label>Max per order</label><input id="ef-maxPerOrder" type="number" value="4" /></div>
+    </div>
+    <div class="form-group"><label>Address (revealed post-purchase)</label><input id="ef-address" type="text" /></div>
+    <div class="form-group"><label>Images (URLs, comma-separated)</label><textarea id="ef-images" rows="2"></textarea></div>
+    <div class="form-group"><label>Tags (comma-separated)</label><input id="ef-tags" type="text" /></div>
+    <div class="form-group"><label>Description</label><textarea id="ef-description" rows="3"></textarea></div>
+    <div class="form-group"><label>Age policy</label><input id="ef-agePolicy" type="text" placeholder="18+" /></div>
+    <div class="form-group"><label>Dress code</label><input id="ef-dressCode" type="text" /></div>
+    <div class="form-group"><label>Important info</label><textarea id="ef-importantInfo" rows="2"></textarea></div>
+    <div class="form-group" style="display:flex;gap:20px">
+      <label><input type="checkbox" id="ef-isFeatured" /> Featured</label>
+      <label><input type="checkbox" id="ef-isSoldOut" /> Sold out</label>
+      <label><input type="checkbox" id="ef-isActive" checked /> Active</label>
+    </div>
+    <div class="card-actions">
+      <button class="btn btn-primary" onclick="saveEvent(${id ? `'${id}'` : 'null'})">Save event</button>
+      <button class="btn btn-secondary" onclick="el('event-form-wrap').innerHTML=''">Cancel</button>
+    </div>
+  </div>`;
+}
+async function prefillEventForm(id) {
+  try {
+    const d = await apiGet(`/api/explore/events/${id}`);
+    const e = d.event;
+    el("ef-title").value = e.title || "";
+    el("ef-category").value = (e.category || "");
+    if (e.eventDate) el("ef-eventDate").value = new Date(e.eventDate).toISOString().slice(0,16);
+    if (e.eventEndDate) el("ef-eventEndDate").value = new Date(e.eventEndDate).toISOString().slice(0,16);
+    el("ef-venue").value = e.venue || "";
+    el("ef-city").value = e.city || "Chennai";
+    el("ef-ticketPrice").value = e.ticketPrice || "";
+    el("ef-originalPrice").value = e.originalPrice || "";
+    el("ef-availableSlots").value = e.availableSlots ?? "";
+    el("ef-maxPerOrder").value = e.maxPerOrder || 4;
+    el("ef-images").value = (e.images || []).join(", ");
+    el("ef-tags").value = (e.tags || []).join(", ");
+    el("ef-description").value = e.description || "";
+    el("ef-agePolicy").value = e.agePolicy || "";
+    el("ef-dressCode").value = e.dressCode || "";
+    el("ef-importantInfo").value = e.importantInfo || "";
+    el("ef-isFeatured").checked = e.isFeatured || false;
+    el("ef-isSoldOut").checked = e.isSoldOut || false;
+    el("ef-isActive").checked = e.isActive !== false;
+  } catch (e2) { toast(e2.message, true); }
+}
+async function saveEvent(id) {
+  const payload = {
+    title: el("ef-title").value.trim(),
+    category: el("ef-category").value.trim(),
+    eventDate: el("ef-eventDate").value,
+    eventEndDate: el("ef-eventEndDate").value || undefined,
+    venue: el("ef-venue").value.trim(),
+    city: el("ef-city").value.trim() || "Chennai",
+    ticketPrice: Number(el("ef-ticketPrice").value),
+    originalPrice: Number(el("ef-originalPrice").value) || undefined,
+    availableSlots: Number(el("ef-availableSlots").value) || undefined,
+    maxPerOrder: Number(el("ef-maxPerOrder").value) || 4,
+    address: el("ef-address").value.trim(),
+    images: el("ef-images").value.split(",").map(s=>s.trim()).filter(Boolean),
+    tags: el("ef-tags").value.split(",").map(s=>s.trim()).filter(Boolean),
+    description: el("ef-description").value.trim(),
+    agePolicy: el("ef-agePolicy").value.trim(),
+    dressCode: el("ef-dressCode").value.trim(),
+    importantInfo: el("ef-importantInfo").value.trim(),
+    isFeatured: el("ef-isFeatured").checked,
+    isSoldOut: el("ef-isSoldOut").checked,
+    isActive: el("ef-isActive").checked,
+  };
+  if (!payload.title || !payload.eventDate || !payload.ticketPrice) return toast("Title, date, and price required", true);
+  try {
+    if (id) await apiPatch(`/api/admin/explore/events/${id}`, payload);
+    else await apiPost("/api/admin/explore/events", payload);
+    toast("Event saved ✓"); el("event-form-wrap").innerHTML = ""; loadEvents();
+  } catch (e) { toast(e.message, true); }
+}
+</script>
+</body>
+</html>

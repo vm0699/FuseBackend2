@@ -2,6 +2,45 @@ import mongoose from "mongoose";
 
 const { Schema } = mongoose;
 
+/**
+ * Gift order state machine (Phase 2 MVP):
+ *
+ *   CREATED -> PAID -> ADMIN_REVIEW -> APPROVED -> PROCESSING -> FULFILLED -> DELIVERED
+ *   any (pre-fulfilment) -> CANCELLED
+ *   recipient decline after payment -> REFUND_REQUIRED -> REFUNDED
+ *
+ * Terminal : DELIVERED, CANCELLED, REFUNDED
+ * Active    : CREATED, PAID, ADMIN_REVIEW, APPROVED, PROCESSING, FULFILLED, REFUND_REQUIRED
+ */
+export const GIFT_ORDER_STATUSES = [
+  "CREATED",
+  "PAID",
+  "ADMIN_REVIEW",
+  "APPROVED",
+  "PROCESSING",
+  "FULFILLED",
+  "DELIVERED",
+  "CANCELLED",
+  "REFUND_REQUIRED",
+  "REFUNDED",
+];
+
+export const GIFT_ORDER_TERMINAL_STATUSES = [
+  "DELIVERED",
+  "CANCELLED",
+  "REFUNDED",
+];
+
+export const GIFT_ORDER_ACTIVE_STATUSES = [
+  "CREATED",
+  "PAID",
+  "ADMIN_REVIEW",
+  "APPROVED",
+  "PROCESSING",
+  "FULFILLED",
+  "REFUND_REQUIRED",
+];
+
 const GiftOrderSchema = new Schema(
   {
     chatId: {
@@ -10,11 +49,26 @@ const GiftOrderSchema = new Schema(
       required: true,
     },
 
-    // May be null for legacy/manual orders
     intentId: {
       type: Schema.Types.ObjectId,
       ref: "GiftIntent",
       default: null,
+      unique: true,
+      sparse: true,
+    },
+
+    paymentId: {
+      type: Schema.Types.ObjectId,
+      ref: "GiftPayment",
+      default: null,
+    },
+
+    // Human-readable support/tracking code, e.g. FUSE-G-AB12CD
+    orderCode: {
+      type: String,
+      unique: true,
+      sparse: true,
+      index: true,
     },
 
     senderId: {
@@ -29,10 +83,15 @@ const GiftOrderSchema = new Schema(
       required: true,
     },
 
-    // Mirrors GiftIntent tier when available
     tier: {
       type: String,
-      enum: ["LOW", "MID", "HIGH", null],
+      enum: ["LOW", "MID", null],
+      default: null,
+    },
+
+    catalogItemId: {
+      type: Schema.Types.ObjectId,
+      ref: "GiftCatalogItem",
       default: null,
     },
 
@@ -61,12 +120,7 @@ const GiftOrderSchema = new Schema(
       required: true,
     },
 
-    // Who actually paid what (from GiftPayment)
     senderPaidAmount: {
-      type: Number,
-      default: 0,
-    },
-    recipientPaidAmount: {
       type: Number,
       default: 0,
     },
@@ -76,7 +130,7 @@ const GiftOrderSchema = new Schema(
       default: "INR",
     },
 
-    // Platform economics (we can refine later)
+    // Platform economics
     platformFee: {
       type: Number,
       default: 0,
@@ -90,21 +144,34 @@ const GiftOrderSchema = new Schema(
       default: 0,
     },
 
-    // Fulfilment lifecycle
     status: {
       type: String,
-      enum: [
-        "CREATED",     // payment done, yet to process
-        "PROCESSING",  // vendor / ops picked it up
-        "DISPATCHED",  // out for delivery
-        "DELIVERED",   // reached
-        "FAILED",      // delivery failed
-        "CANCELLED",
-      ],
+      enum: GIFT_ORDER_STATUSES,
       default: "CREATED",
     },
 
-    // Frozen delivery snapshot (FULL, but we won’t expose all of it in APIs)
+    // Append-only audit of every status change
+    statusHistory: [
+      {
+        status: { type: String, enum: GIFT_ORDER_STATUSES },
+        action: { type: String, default: "" },
+        byUserId: {
+          type: Schema.Types.ObjectId,
+          ref: "UserProfile",
+          default: null,
+        },
+        byRole: {
+          type: String,
+          enum: ["ADMIN", "RECIPIENT", "SENDER", "SYSTEM"],
+          default: "SYSTEM",
+        },
+        note: { type: String, default: "" },
+        at: { type: Date, default: Date.now },
+      },
+    ],
+
+    // Frozen FULL delivery snapshot. Never exposed wholesale to the sender —
+    // serializers strip it based on viewer role.
     deliverySnapshot: {
       name: String,
       phone: String,
@@ -114,10 +181,16 @@ const GiftOrderSchema = new Schema(
       state: String,
       pincode: String,
       landmark: String,
-      label: String, // e.g. "Home", "Work"
+      label: String,
     },
 
-    // Tracking info (can be used to show in UI)
+    // Defensive guard: true when the recipient had no usable address at
+    // payment time. Order is held in ADMIN_REVIEW until resolved.
+    addressMissing: {
+      type: Boolean,
+      default: false,
+    },
+
     trackingUrl: {
       type: String,
       default: null,
@@ -127,10 +200,21 @@ const GiftOrderSchema = new Schema(
       default: null,
     },
 
+    // Admin-only internal notes
+    adminNotes: {
+      type: String,
+      default: "",
+    },
+
     // Lifecycle timestamps
+    approvedAt: Date,
+    processingAt: Date,
+    fulfilledAt: Date,
     dispatchedAt: Date,
     deliveredAt: Date,
     cancelledAt: Date,
+    refundRequiredAt: Date,
+    refundedAt: Date,
 
     note: {
       type: String,
@@ -139,5 +223,10 @@ const GiftOrderSchema = new Schema(
   },
   { timestamps: true }
 );
+
+GiftOrderSchema.index({ chatId: 1, status: 1, createdAt: -1 });
+GiftOrderSchema.index({ senderId: 1, createdAt: -1 });
+GiftOrderSchema.index({ recipientId: 1, createdAt: -1 });
+GiftOrderSchema.index({ status: 1, createdAt: -1 });
 
 export default mongoose.model("GiftOrder", GiftOrderSchema);

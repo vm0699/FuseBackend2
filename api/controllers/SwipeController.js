@@ -1,6 +1,7 @@
 import Like from "../models/Like.js";
 import Chat from "../models/ChatModel.js";
 import UserProfile from "../models/UserProfile.js";
+import SwipeRecord from "../models/SwipeRecord.js";
 import { deriveSwipeState, getSwipeTransition } from "../lib/swipeStateMachine.js";
 import { ensureChatTwilioChannel } from "../services/chatTwilioService.js";
 
@@ -191,6 +192,13 @@ export const handleSwipe = async (req, res) => {
         ),
       ]);
 
+      // Dual-write to SwipeRecord (fire and forget — non-blocking)
+      SwipeRecord.findOneAndUpdate(
+        { swiperId: loggedInUserId, swipedId: swipedUserId },
+        { $set: { action: "dislike" } },
+        { upsert: true }
+      ).catch(() => {});
+
       return res
         .status(200)
         .json(buildNoMatchResponse({ swipeState: "disliked" }));
@@ -219,6 +227,13 @@ export const handleSwipe = async (req, res) => {
         }
       ),
     ]);
+
+    // Dual-write to SwipeRecord (fire and forget — non-blocking)
+    SwipeRecord.findOneAndUpdate(
+      { swiperId: loggedInUserId, swipedId: swipedUserId },
+      { $set: { action: "like" } },
+      { upsert: true }
+    ).catch(() => {});
 
     const reciprocalLikeAfterUpdate =
       reciprocalLike ||
