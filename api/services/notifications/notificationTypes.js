@@ -3,9 +3,6 @@ export const NOTIFICATION_TYPES = {
   COMPLIMENT_ACCEPTED: "COMPLIMENT_ACCEPTED",
   COMPLIMENT_REJECTED: "COMPLIMENT_REJECTED",
   CHAT_MESSAGE: "CHAT_MESSAGE",
-  GIFT_INTENT_RECEIVED: "GIFT_INTENT_RECEIVED",
-  GIFT_INTENT_ACCEPTED: "GIFT_INTENT_ACCEPTED",
-  GIFT_INTENT_REJECTED: "GIFT_INTENT_REJECTED",
   GIFT_PAYMENT_SUCCESS: "GIFT_PAYMENT_SUCCESS",
   GIFT_PAYMENT_FAILED: "GIFT_PAYMENT_FAILED",
   GIFT_ORDER_DISPATCHED: "GIFT_ORDER_DISPATCHED",
@@ -40,6 +37,12 @@ export const NOTIFICATION_TYPES = {
   EXPLORE_ADMIN_NEW_BOOKING: "EXPLORE_ADMIN_NEW_BOOKING",
   EXPLORE_ADMIN_NEW_TICKET: "EXPLORE_ADMIN_NEW_TICKET",
   EXPLORE_ADMIN_NEW_PREMIUM: "EXPLORE_ADMIN_NEW_PREMIUM",
+
+  // Fuse Explore — Iteration 2: Event Circles
+  EVENT_RSVP_CONFIRMED: "EVENT_RSVP_CONFIRMED",
+  EVENT_WAVE_RECEIVED: "EVENT_WAVE_RECEIVED",
+  EVENT_WAVE_MATCHED: "EVENT_WAVE_MATCHED",
+  EVENT_BADGE_EARNED: "EVENT_BADGE_EARNED",
 };
 
 export const NOTIFICATION_DEFAULTS = {
@@ -62,21 +65,6 @@ export const NOTIFICATION_DEFAULTS = {
     title: "New message",
     body: "You have a new message.",
     screen: "ChatScreen",
-  },
-  [NOTIFICATION_TYPES.GIFT_INTENT_RECEIVED]: {
-    title: "Gift request received",
-    body: "You received a gift intent.",
-    screen: "GiftIntentDetailsScreen",
-  },
-  [NOTIFICATION_TYPES.GIFT_INTENT_ACCEPTED]: {
-    title: "Gift accepted",
-    body: "Your gift intent was accepted.",
-    screen: "GiftIntentDetailsScreen",
-  },
-  [NOTIFICATION_TYPES.GIFT_INTENT_REJECTED]: {
-    title: "Gift declined",
-    body: "Your gift intent was declined.",
-    screen: "GiftIntentDetailsScreen",
   },
   [NOTIFICATION_TYPES.GIFT_PAYMENT_SUCCESS]: {
     title: "Gift payment successful",
@@ -215,6 +203,28 @@ export const NOTIFICATION_DEFAULTS = {
     title: "New premium request",
     body: "A premium request needs follow-up.",
     screen: "PremiumRequestScreen",
+  },
+
+  // Explore — Iteration 2: Event Circles
+  [NOTIFICATION_TYPES.EVENT_RSVP_CONFIRMED]: {
+    title: "You're going!",
+    body: "Your RSVP is confirmed.",
+    screen: "MyEvents",
+  },
+  [NOTIFICATION_TYPES.EVENT_WAVE_RECEIVED]: {
+    title: "Someone waved at you",
+    body: "Someone from your event circle waved at you.",
+    screen: "EventCircle",
+  },
+  [NOTIFICATION_TYPES.EVENT_WAVE_MATCHED]: {
+    title: "It's a match!",
+    body: "You and someone from an event circle matched. Say hi!",
+    screen: "ChatScreen",
+  },
+  [NOTIFICATION_TYPES.EVENT_BADGE_EARNED]: {
+    title: "Badge earned!",
+    body: "You earned the Fuse Regular badge.",
+    screen: "MyEvents",
   },
 };
 

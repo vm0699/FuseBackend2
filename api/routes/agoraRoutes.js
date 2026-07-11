@@ -2,6 +2,7 @@
 import { Router } from "express";
 import authMiddleware from "../middleware/authMiddleware.js";
 import AgoraTokenPkg from "agora-access-token";
+import VideoQueueEntry from "../models/VideoQueueEntry.js";
 
 const { RtmTokenBuilder, RtmRole, RtcTokenBuilder, RtcRole } = AgoraTokenPkg;
 
@@ -59,6 +60,19 @@ router.get("/token", authMiddleware, async (req, res) => {
     const parsedUid = Number(uid);
     if (!Number.isInteger(parsedUid) || parsedUid <= 0) {
       return res.status(400).json({ message: "uid must be a positive integer" });
+    }
+
+    // 🔒 Only issue a token for a channel the requester is actually matched
+    // into via the video queue — otherwise any authenticated user could
+    // mint a PUBLISHER token for any guessed/leaked channelName.
+    const authorizedEntry = await VideoQueueEntry.findOne({
+      roomId: String(channelName),
+      status: "matched",
+      $or: [{ userId: req.user.id }, { matchedUserId: req.user.id }],
+    }).lean();
+
+    if (!authorizedEntry) {
+      return res.status(403).json({ message: "Not authorized for this channel" });
     }
 
     const expireTimeInSeconds = 3600;

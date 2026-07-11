@@ -5,6 +5,7 @@
  */
 import Event from "../models/Event.js";
 import EventTicketOrder from "../models/EventTicketOrder.js";
+import EventRsvp from "../models/EventRsvp.js";
 import Payment from "../models/Payment.js";
 import { createPayment, verifyPayment } from "../services/paymentProvider.js";
 import { alertNewTicketOrder } from "../services/opsAlertService.js";
@@ -145,6 +146,34 @@ export const confirmTicketPayment = async (req, res) => {
 
     // Reserve slots atomically
     await Event.findByIdAndUpdate(order.eventId, { $inc: { soldSlots: order.quantity } });
+
+    // Silently enter the buyer into the Event Circle (same door as a free RSVP).
+    // Fire-and-forget: never blocks or fails the ticket purchase response.
+    (async () => {
+      const wasActive = await EventRsvp.exists({
+        userId,
+        eventId: order.eventId,
+        status: { $in: ["GOING", "CHECKED_IN"] },
+      });
+      await EventRsvp.findOneAndUpdate(
+        { userId, eventId: order.eventId },
+        {
+          $set: {
+            status: "GOING",
+            source: "TICKET",
+            ticketOrderId: order._id,
+            eventSnapshot: {
+              title: order.eventSnapshot?.title,
+              eventDate: order.eventSnapshot?.eventDate,
+            },
+          },
+        },
+        { upsert: true, setDefaultsOnInsert: true }
+      );
+      if (!wasActive) {
+        await Event.findByIdAndUpdate(order.eventId, { $inc: { rsvpCount: 1 } });
+      }
+    })().catch(() => {});
 
     logEvent("ticket_confirmed", userId, { orderId: order._id.toString() });
 

@@ -15,6 +15,8 @@ import {
   updatePremiumStatus,
   upsertVenue,
   upsertEvent,
+  regenerateEventCheckInCode,
+  getEventRsvpRoster,
 } from "../controllers/AdminExploreController.js";
 
 const router = express.Router();
@@ -41,5 +43,7 @@ router.post("/venues", upsertVenue);
 router.patch("/venues/:venueId", upsertVenue);
 router.post("/events", upsertEvent);
 router.patch("/events/:eventId", upsertEvent);
+router.post("/events/:eventId/checkin-code/regenerate", regenerateEventCheckInCode);
+router.get("/events/:eventId/rsvps", getEventRsvpRoster);
 
 export default router;

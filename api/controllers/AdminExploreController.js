@@ -8,6 +8,7 @@ import EventTicketOrder from "../models/EventTicketOrder.js";
 import PremiumRequest from "../models/PremiumRequest.js";
 import Venue from "../models/Venue.js";
 import Event from "../models/Event.js";
+import EventRsvp from "../models/EventRsvp.js";
 import notificationService from "../services/notificationService.js";
 import { NOTIFICATION_TYPES } from "../services/notifications/notificationTypes.js";
 
@@ -271,19 +272,75 @@ export const upsertVenue = async (req, res) => {
   }
 };
 
+const generateCheckInCode = () => String(Math.floor(1000 + Math.random() * 9000));
+
 export const upsertEvent = async (req, res) => {
   try {
     const { eventId } = req.params;
     const data = req.body;
+
+    // ticketPrice/totalSlots are only mandatory for Fuse-sold tickets. Validated here
+    // (not via a schema `required` function) because update-validators run with a
+    // different `this` context and would misfire on PATCH.
+    const pricingType = data.pricingType || "PAID_FUSE";
+    if (pricingType === "PAID_FUSE" && (data.ticketPrice == null || data.totalSlots == null)) {
+      return res.status(400).json({
+        success: false,
+        message: "ticketPrice and totalSlots are required for PAID_FUSE events.",
+      });
+    }
+
     let event;
     if (eventId) {
       event = await Event.findByIdAndUpdate(eventId, { $set: data }, { new: true, runValidators: true });
     } else {
+      if (!data.checkInCode) data.checkInCode = generateCheckInCode();
       event = await Event.create(data);
     }
     res.json({ success: true, event });
   } catch (err) {
     res.status(400).json({ success: false, message: err.message });
+  }
+};
+
+export const regenerateEventCheckInCode = async (req, res) => {
+  try {
+    const { eventId } = req.params;
+    const checkInCode = generateCheckInCode();
+    const event = await Event.findByIdAndUpdate(eventId, { $set: { checkInCode } }, { new: true });
+    if (!event) return res.status(404).json({ success: false, message: "Event not found." });
+    res.json({ success: true, checkInCode });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+export const getEventRsvpRoster = async (req, res) => {
+  try {
+    const { eventId } = req.params;
+    const rsvps = await EventRsvp.find({ eventId, status: { $in: ["GOING", "CHECKED_IN"] } })
+      .populate("userId", "name phoneNumber")
+      .sort({ status: 1, createdAt: 1 })
+      .lean();
+
+    const roster = rsvps.map((r) => ({
+      _id: r._id,
+      userName: r.userId?.name,
+      userPhone: r.userId?.phoneNumber,
+      status: r.status,
+      source: r.source,
+      checkedInAt: r.checkedInAt,
+      createdAt: r.createdAt,
+    }));
+
+    res.json({
+      success: true,
+      roster,
+      goingCount: roster.filter((r) => r.status === "GOING").length,
+      checkedInCount: roster.filter((r) => r.status === "CHECKED_IN").length,
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
   }
 };
 
@@ -314,5 +371,7 @@ export default {
   updatePremiumStatus,
   upsertVenue,
   upsertEvent,
+  regenerateEventCheckInCode,
+  getEventRsvpRoster,
 };
 

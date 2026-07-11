@@ -32,6 +32,15 @@ import {
   confirmPremiumPayment,
   getMyPremiumRequests,
 } from "../controllers/PremiumController.js";
+import {
+  createRsvp,
+  cancelRsvp,
+  updateRsvpVisibility,
+  getMyEvents,
+  checkin,
+  getCircle,
+  wave,
+} from "../controllers/EventCircleController.js";
 
 const router = express.Router();
 
@@ -41,6 +50,15 @@ router.get("/venues", getVenues);
 router.get("/venues/:venueId", getVenueDetail);
 router.get("/events", getEvents);
 router.get("/events/:eventId", getEventDetail);
+
+// ─── Event circle (Iteration 2: RSVP lifecycle) ────────────────────────────────
+router.post("/events/:eventId/rsvp", createRsvp);
+router.post("/events/:eventId/rsvp/cancel", cancelRsvp);
+router.patch("/events/:eventId/rsvp", updateRsvpVisibility);
+router.get("/events/:eventId/circle", getCircle);
+router.post("/events/:eventId/wave", wave);
+router.post("/events/:eventId/checkin", checkin);
+router.get("/my-events", getMyEvents);
 
 // ─── Date bookings ────────────────────────────────────────────────────────────
 router.post("/bookings", createBooking);

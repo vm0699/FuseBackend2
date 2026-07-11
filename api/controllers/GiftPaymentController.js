@@ -1,3 +1,4 @@
+import crypto from "crypto";
 import GiftIntent from "../models/GiftIntentModel.js";
 import GiftOrder from "../models/GiftOrder.js";
 import GiftPayment from "../models/GiftPaymentModel.js";
@@ -13,7 +14,7 @@ import {
   generateOrderCode,
   isDeliveryAddressUsable,
 } from "../services/giftOrderService.js";
-import { notifyAdminsNewOrder } from "../services/adminAlertService.js";
+import { alertNewGiftOrder } from "../services/opsAlertService.js";
 
 /**
  * STEP 1 — Initiate payment for an intent (SENDER ONLY, payment-first MVP).
@@ -122,10 +123,147 @@ export const initiateGiftPayment = async (req, res) => {
 };
 
 /**
+ * Shared finalize step, called after a payment is verified as successful —
+ * either by the client's confirm call or by the Razorpay webhook (whichever
+ * arrives first; the other is a no-op thanks to the idempotency guards here).
+ *
+ * Marks payment/intent PAID, creates the GiftOrder idempotently with a frozen
+ * recipient address snapshot (sender never sees it), fires the ops alert, and
+ * notifies both participants. Returns the order (existing or newly created).
+ */
+const finalizeGiftPayment = async ({ payment, intent, providerPaymentId }) => {
+  const mode = getGiftPaymentMode();
+
+  // Mark payment PAID.
+  payment.status = "PAID";
+  payment.providerPaymentId = providerPaymentId || payment.providerPaymentId || null;
+  payment.verifiedAt = new Date();
+  payment.meta = { ...(payment.meta || {}), mode };
+  await payment.save();
+
+  // Mark intent PAID.
+  intent.status = "PAID";
+  intent.senderPaidAmount = payment.amount;
+  intent.senderPaidAt = new Date();
+  await intent.save();
+
+  // Create the order once (idempotent on intentId).
+  let order = await GiftOrder.findOne({ intentId: intent._id });
+  if (!order) {
+    // Freeze recipient delivery address (never exposed to sender).
+    const recipientProfile = await UserProfile.findById(intent.recipientId).select(
+      "deliveryAddress phoneNumber name"
+    );
+    const addr = recipientProfile?.deliveryAddress || {};
+    const addressMissing = !isDeliveryAddressUsable(addr);
+
+    const deliverySnapshot = {
+      name: addr.name || recipientProfile?.name || "",
+      phone: addr.phone || recipientProfile?.phoneNumber || "",
+      line1: addr.line1 || "",
+      line2: addr.line2 || "",
+      city: addr.city || "",
+      state: addr.state || "",
+      pincode: addr.pincode || "",
+      landmark: addr.landmark || "",
+      label: addr.label || "",
+    };
+
+    const snap = intent.catalogSnapshot || {};
+
+    order = await GiftOrder.create({
+      chatId: intent.chatId,
+      intentId: intent._id,
+      paymentId: payment._id,
+      orderCode: generateOrderCode(),
+      senderId: intent.senderId,
+      recipientId: intent.recipientId,
+      tier: intent.tier,
+      catalogItemId: intent.catalogItemId || null,
+      items: intent.items,
+      source: "FUSE_MANUAL",
+      totalAmount: intent.totalAmount,
+      senderPaidAmount: intent.senderPaidAmount || 0,
+      currency: "INR",
+      platformFee: Number(snap.platformFee || 0),
+      deliveryFee: Number(snap.deliveryFee || 0),
+      vendorCost: 0,
+      status: "ADMIN_REVIEW",
+      addressMissing,
+      deliverySnapshot,
+      statusHistory: [
+        {
+          status: "PAID",
+          action: "PAYMENT_CONFIRMED",
+          byUserId: intent.senderId,
+          byRole: "SENDER",
+          at: new Date(),
+        },
+        {
+          status: "ADMIN_REVIEW",
+          action: "AUTO_SUBMITTED",
+          byRole: "SYSTEM",
+          note: addressMissing ? "Recipient address missing — held for review" : "",
+          at: new Date(),
+        },
+      ],
+    });
+
+    // Fire ops alert (email + WhatsApp + admin push) without blocking the caller.
+    alertNewGiftOrder(order).catch((e) =>
+      console.error("[GIFT] ops alert failed", e)
+    );
+  }
+
+  // Notify sender + recipient — fire-and-forget so a push failure never
+  // causes a 500 after the order is already persisted.
+  notificationService
+    .sendToUser(
+      intent.senderId,
+      notificationService.buildNotificationPayload({
+        type: NOTIFICATION_TYPES.GIFT_PAYMENT_SUCCESS,
+        data: {
+          intentId: intent._id.toString(),
+          orderId: order._id.toString(),
+          chatId: String(intent.chatId),
+          paymentId: payment._id.toString(),
+          screen: "GiftOrderTrackingScreen",
+        },
+      })
+    )
+    .catch((e) => console.error("[GIFT] sender notify failed", e));
+
+  if (intent.recipientId.toString() !== intent.senderId.toString()) {
+    notificationService
+      .sendToUser(
+        intent.recipientId,
+        notificationService.buildNotificationPayload({
+          type: NOTIFICATION_TYPES.GIFT_ORDER_STATUS,
+          title: "You have a gift! 🎁",
+          body: "Someone sent you a gift. It's being processed.",
+          data: {
+            orderId: order._id.toString(),
+            chatId: String(intent.chatId),
+            screen: "GiftOrderTrackingScreen",
+          },
+        })
+      )
+      .catch((e) => console.error("[GIFT] recipient notify failed", e));
+  }
+
+  return order;
+};
+
+/**
  * STEP 2 — Confirm payment and create the order in ADMIN_REVIEW.
  *
  * On success: payment->PAID, intent->PAID, GiftOrder created idempotently with a
  * frozen recipient address snapshot (sender never sees it), admin alerted.
+ *
+ * Note: for RAZORPAY mode this is a client-reported confirmation, verified by
+ * HMAC. The webhook handler below (handleGiftRazorpayWebhook) is the
+ * authoritative, server-to-server confirmation and reaches the same idempotent
+ * finalizeGiftPayment — whichever arrives first "wins"; the other is a no-op.
  */
 export const confirmGiftPayment = async (req, res) => {
   try {
@@ -179,7 +317,6 @@ export const confirmGiftPayment = async (req, res) => {
       });
     }
 
-    const mode = getGiftPaymentMode();
     const normalizedStatus = String(requestedStatus || "PAID").toUpperCase();
 
     // Explicit client-reported failure.
@@ -227,122 +364,11 @@ export const confirmGiftPayment = async (req, res) => {
       });
     }
 
-    // Mark payment PAID.
-    payment.status = "PAID";
-    payment.providerPaymentId = verification.providerPaymentId || providerPaymentId || null;
-    payment.verifiedAt = new Date();
-    payment.meta = { ...(payment.meta || {}), mode };
-    await payment.save();
-
-    // Mark intent PAID.
-    intent.status = "PAID";
-    intent.senderPaidAmount = payment.amount;
-    intent.senderPaidAt = new Date();
-    await intent.save();
-
-    // Create the order once (idempotent on intentId).
-    let order = await GiftOrder.findOne({ intentId: intent._id });
-    if (!order) {
-      // Freeze recipient delivery address (never exposed to sender).
-      const recipientProfile = await UserProfile.findById(intent.recipientId).select(
-        "deliveryAddress phoneNumber name"
-      );
-      const addr = recipientProfile?.deliveryAddress || {};
-      const addressMissing = !isDeliveryAddressUsable(addr);
-
-      const deliverySnapshot = {
-        name: addr.name || recipientProfile?.name || "",
-        phone: addr.phone || recipientProfile?.phoneNumber || "",
-        line1: addr.line1 || "",
-        line2: addr.line2 || "",
-        city: addr.city || "",
-        state: addr.state || "",
-        pincode: addr.pincode || "",
-        landmark: addr.landmark || "",
-        label: addr.label || "",
-      };
-
-      const snap = intent.catalogSnapshot || {};
-
-      order = await GiftOrder.create({
-        chatId: intent.chatId,
-        intentId: intent._id,
-        paymentId: payment._id,
-        orderCode: generateOrderCode(),
-        senderId: intent.senderId,
-        recipientId: intent.recipientId,
-        tier: intent.tier,
-        catalogItemId: intent.catalogItemId || null,
-        items: intent.items,
-        source: "FUSE_MANUAL",
-        totalAmount: intent.totalAmount,
-        senderPaidAmount: intent.senderPaidAmount || 0,
-        currency: "INR",
-        platformFee: Number(snap.platformFee || 0),
-        deliveryFee: Number(snap.deliveryFee || 0),
-        vendorCost: 0,
-        status: "ADMIN_REVIEW",
-        addressMissing,
-        deliverySnapshot,
-        statusHistory: [
-          {
-            status: "PAID",
-            action: "PAYMENT_CONFIRMED",
-            byUserId: intent.senderId,
-            byRole: "SENDER",
-            at: new Date(),
-          },
-          {
-            status: "ADMIN_REVIEW",
-            action: "AUTO_SUBMITTED",
-            byRole: "SYSTEM",
-            note: addressMissing ? "Recipient address missing — held for review" : "",
-            at: new Date(),
-          },
-        ],
-      });
-
-      // Fire admin alert without blocking the response.
-      notifyAdminsNewOrder(order).catch((e) =>
-        console.error("[GIFT] admin alert failed", e)
-      );
-    }
-
-    // Notify sender + recipient — fire-and-forget so a push failure never
-    // causes a 500 after the order is already persisted.
-    notificationService
-      .sendToUser(
-        intent.senderId,
-        notificationService.buildNotificationPayload({
-          type: NOTIFICATION_TYPES.GIFT_PAYMENT_SUCCESS,
-          data: {
-            intentId: intent._id.toString(),
-            orderId: order._id.toString(),
-            chatId: String(intent.chatId),
-            paymentId: payment._id.toString(),
-            screen: "GiftOrderTrackingScreen",
-          },
-        })
-      )
-      .catch((e) => console.error("[GIFT] sender notify failed", e));
-
-    if (intent.recipientId.toString() !== intent.senderId.toString()) {
-      notificationService
-        .sendToUser(
-          intent.recipientId,
-          notificationService.buildNotificationPayload({
-            type: NOTIFICATION_TYPES.GIFT_ORDER_STATUS,
-            title: "You have a gift! 🎁",
-            body: "Someone sent you a gift. It's being processed.",
-            data: {
-              orderId: order._id.toString(),
-              chatId: String(intent.chatId),
-              screen: "GiftOrderTrackingScreen",
-            },
-          })
-        )
-        .catch((e) => console.error("[GIFT] recipient notify failed", e));
-    }
+    const order = await finalizeGiftPayment({
+      payment,
+      intent,
+      providerPaymentId: verification.providerPaymentId || providerPaymentId || null,
+    });
 
     return res.status(200).json({
       success: true,
@@ -360,5 +386,116 @@ export const confirmGiftPayment = async (req, res) => {
       success: false,
       message: "Failed to confirm gift payment",
     });
+  }
+};
+
+/**
+ * POST /api/gifts/razorpay/webhook
+ *
+ * Server-to-server, authoritative confirmation from Razorpay — the robust
+ * counterpart to the client's confirmGiftPayment call above (which can be
+ * skipped entirely if the app crashes/closes right after payment). Both paths
+ * converge on the same finalizeGiftPayment, so whichever arrives first wins
+ * and the other is a safe no-op.
+ *
+ * Must be mounted with express.raw() (see GiftRoutes.js / server.js) — the
+ * signature is computed over the exact raw request bytes, not the parsed body.
+ */
+export const handleGiftRazorpayWebhook = async (req, res) => {
+  try {
+    const webhookSecret = process.env.RAZORPAY_WEBHOOK_SECRET;
+    if (!webhookSecret) {
+      console.error("[GIFT WEBHOOK] RAZORPAY_WEBHOOK_SECRET not set — rejecting.");
+      return res.status(500).json({ success: false });
+    }
+
+    const signature = req.headers["x-razorpay-signature"];
+    const rawBody = req.body; // Buffer, thanks to express.raw() on this route.
+    if (!signature || !Buffer.isBuffer(rawBody)) {
+      return res.status(400).json({ success: false, message: "Missing signature or body" });
+    }
+
+    const expected = crypto
+      .createHmac("sha256", webhookSecret)
+      .update(rawBody)
+      .digest("hex");
+
+    const validSignature =
+      expected.length === signature.length &&
+      crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(String(signature)));
+
+    if (!validSignature) {
+      console.error("[GIFT WEBHOOK] Invalid signature — rejecting.");
+      return res.status(400).json({ success: false, message: "Invalid signature" });
+    }
+
+    const event = JSON.parse(rawBody.toString("utf8"));
+    const eventType = event?.event;
+
+    // Only gift-payment events matter here; the same Razorpay account may
+    // fire webhooks for other Fuse Explore verticals too — ack and ignore.
+    if (eventType !== "payment.captured" && eventType !== "payment.failed") {
+      return res.status(200).json({ success: true, ignored: true });
+    }
+
+    const paymentEntity = event?.payload?.payment?.entity;
+    const providerOrderId = paymentEntity?.order_id;
+    const providerPaymentId = paymentEntity?.id;
+    if (!providerOrderId) {
+      return res.status(200).json({ success: true, ignored: true });
+    }
+
+    const payment = await GiftPayment.findOne({ providerOrderId });
+    if (!payment) {
+      // Not a gift payment (could belong to another vertical on the same
+      // Razorpay account) — ack so Razorpay stops retrying.
+      return res.status(200).json({ success: true, ignored: true });
+    }
+
+    if (eventType === "payment.failed") {
+      if (payment.status === "INITIATED") {
+        payment.status = "FAILED";
+        payment.providerPaymentId = providerPaymentId || null;
+        payment.failureReason = "razorpay_webhook_failed";
+        await payment.save();
+
+        notificationService
+          .sendToUser(
+            payment.userId,
+            notificationService.buildNotificationPayload({
+              type: NOTIFICATION_TYPES.GIFT_PAYMENT_FAILED,
+              data: {
+                intentId: payment.giftIntentId.toString(),
+                paymentId: payment._id.toString(),
+                screen: "GiftIntentDetailsScreen",
+              },
+            })
+          )
+          .catch((e) => console.error("[GIFT WEBHOOK] failure notify failed", e));
+      }
+      return res.status(200).json({ success: true });
+    }
+
+    // payment.captured — idempotent: no-op if already finalized by the
+    // client's own confirm call.
+    if (payment.status === "PAID") {
+      return res.status(200).json({ success: true, alreadyConfirmed: true });
+    }
+
+    const intent = await GiftIntent.findById(payment.giftIntentId);
+    if (!intent) {
+      console.error("[GIFT WEBHOOK] Payment found but intent missing", {
+        paymentId: payment._id.toString(),
+      });
+      return res.status(200).json({ success: true, ignored: true });
+    }
+
+    await finalizeGiftPayment({ payment, intent, providerPaymentId });
+
+    return res.status(200).json({ success: true });
+  } catch (err) {
+    console.error("🔥 [GIFT WEBHOOK] handleGiftRazorpayWebhook error", err);
+    // 500 so Razorpay retries per its standard webhook retry policy.
+    return res.status(500).json({ success: false });
   }
 };

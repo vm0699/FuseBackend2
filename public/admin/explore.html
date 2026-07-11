@@ -131,6 +131,10 @@
   /* ─── Util ───────────────────────────────────────────────────── */
   .empty { text-align: center; padding: 48px 0; color: var(--text3); }
   .loading { text-align: center; padding: 48px 0; color: var(--text3); }
+  .roster { margin-top: 10px; border-top: 1px solid var(--border); padding-top: 10px; }
+  .roster-table { width: 100%; border-collapse: collapse; margin-top: 8px; font-size: 13px; }
+  .roster-table th, .roster-table td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--border); }
+  .roster-table th { color: var(--text3); font-weight: 600; }
   .section-title { margin-bottom: 16px; }
   .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
   .divider { border: none; border-top: 1px solid var(--border); margin: 20px 0; }
@@ -732,6 +736,9 @@ async function loadEvents() {
   } catch (e) { el("events-list").innerHTML = `<div class="empty" style="color:var(--red)">${e.message}</div>`; }
 }
 function eventCardAdmin(e) {
+  const priceChip = e.pricingType === "FREE_RSVP" ? "Free RSVP"
+    : e.pricingType === "PAID_EXTERNAL" ? (e.externalPrice || "Paid externally")
+    : `₹${e.ticketPrice}`;
   return `<div class="card">
     <div class="card-header">
       <div>
@@ -744,36 +751,81 @@ function eventCardAdmin(e) {
       </div>
     </div>
     <div class="card-meta">
-      <span class="meta-chip">₹${e.ticketPrice}</span>
+      <span class="meta-chip">${priceChip}</span>
+      ${e.audience === "MEET_PEOPLE" ? '<span class="meta-chip">Meet People</span>' : '<span class="meta-chip">Date Idea</span>'}
+      ${e.goingCount ? `<span class="meta-chip">${e.goingCount} going</span>` : ""}
       ${e.availableSlots != null ? `<span class="meta-chip">Slots: ${e.availableSlots}</span>` : ""}
       ${e.savingsAmount > 0 ? `<span class="meta-chip">Save ₹${e.savingsAmount}</span>` : ""}
     </div>
     <div class="card-actions">
       <button class="btn btn-sm btn-secondary" onclick="showEventForm('${e._id}')">Edit</button>
+      <button class="btn btn-sm btn-secondary" onclick="showRsvpRoster('${e._id}', '${(e.title || "").replace(/'/g, "\\'")}')">RSVPs</button>
     </div>
+    <div id="roster-wrap-${e._id}"></div>
   </div>`;
 }
 function showEventForm(id) {
   el("event-form-wrap").innerHTML = eventForm(id);
   if (id) prefillEventForm(id);
 }
+const EVENT_CATEGORIES = ["comedy", "music", "party", "social", "sports", "workshop", "food", "other"];
+
 function eventForm(id) {
   return `<div class="card" style="border-color:var(--brand)">
     <h3>${id ? "Edit event" : "Add event"}</h3>
     <hr class="divider" />
     <div class="two-col">
       <div class="form-group"><label>Title*</label><input id="ef-title" type="text" /></div>
-      <div class="form-group"><label>Category</label><input id="ef-category" type="text" placeholder="comedy,music,party" /></div>
+      <div class="form-group"><label>Category</label>
+        <select id="ef-category">${EVENT_CATEGORIES.map(c => `<option value="${c}">${c}</option>`).join("")}</select>
+      </div>
+      <div class="form-group"><label>Audience</label>
+        <select id="ef-audience">
+          <option value="MEET_PEOPLE">Meet People (run clubs, parties, meetups)</option>
+          <option value="DATE_IDEA">Date Idea (for matched users)</option>
+        </select>
+      </div>
+      <div class="form-group"><label>Pricing type</label>
+        <select id="ef-pricingType" onchange="onPricingTypeChange()">
+          <option value="PAID_FUSE">Paid via Fuse (Razorpay ticket)</option>
+          <option value="FREE_RSVP">Free RSVP (in-app, no payment)</option>
+          <option value="PAID_EXTERNAL">Paid externally (organizer link + promo code)</option>
+        </select>
+      </div>
       <div class="form-group"><label>Event date & time*</label><input id="ef-eventDate" type="datetime-local" /></div>
       <div class="form-group"><label>Event end date/time</label><input id="ef-eventEndDate" type="datetime-local" /></div>
       <div class="form-group"><label>Venue name</label><input id="ef-venue" type="text" /></div>
       <div class="form-group"><label>City</label><input id="ef-city" type="text" value="Chennai" /></div>
+    </div>
+    <div id="ef-fuse-pricing-fields" class="two-col">
       <div class="form-group"><label>Ticket price (₹)*</label><input id="ef-ticketPrice" type="number" /></div>
       <div class="form-group"><label>Original price (for savings display)</label><input id="ef-originalPrice" type="number" /></div>
-      <div class="form-group"><label>Available slots</label><input id="ef-availableSlots" type="number" /></div>
+      <div class="form-group"><label>Total slots</label><input id="ef-totalSlots" type="number" /></div>
       <div class="form-group"><label>Max per order</label><input id="ef-maxPerOrder" type="number" value="4" /></div>
     </div>
-    <div class="form-group"><label>Address (revealed post-purchase)</label><input id="ef-address" type="text" /></div>
+    <div id="ef-external-pricing-fields" class="two-col" style="display:none">
+      <div class="form-group"><label>External booking URL</label><input id="ef-externalBookingUrl" type="text" placeholder="https://..." /></div>
+      <div class="form-group"><label>External price (display text)</label><input id="ef-externalPrice" type="text" placeholder="₹499 onwards" /></div>
+    </div>
+    <div id="ef-rsvp-fields" class="two-col" style="display:none">
+      <div class="form-group"><label>RSVP cap (blank = unlimited)</label><input id="ef-rsvpCap" type="number" /></div>
+    </div>
+    <div class="two-col">
+      <div class="form-group"><label>Promo code (revealed after RSVP)</label><input id="ef-promoCode" type="text" /></div>
+      <div class="form-group"><label>Check-in code</label>
+        <div style="display:flex;gap:8px;align-items:center">
+          <input id="ef-checkInCode" type="text" readonly style="max-width:100px" />
+          <button type="button" class="btn btn-sm btn-secondary" onclick="regenerateCheckInCode(${id ? `'${id}'` : 'null'})">Regenerate</button>
+        </div>
+      </div>
+    </div>
+    <h4>Organizer</h4>
+    <div class="two-col">
+      <div class="form-group"><label>Organizer name</label><input id="ef-organizerName" type="text" /></div>
+      <div class="form-group"><label>Organizer Instagram</label><input id="ef-organizerInstagram" type="text" placeholder="@handle" /></div>
+      <div class="form-group"><label>Organizer phone (internal only, never shown in app)</label><input id="ef-organizerPhone" type="text" /></div>
+    </div>
+    <div class="form-group"><label>Address (revealed post-purchase/check-in)</label><input id="ef-address" type="text" /></div>
     <div class="form-group"><label>Images (URLs, comma-separated)</label><textarea id="ef-images" rows="2"></textarea></div>
     <div class="form-group"><label>Tags (comma-separated)</label><input id="ef-tags" type="text" /></div>
     <div class="form-group"><label>Description</label><textarea id="ef-description" rows="3"></textarea></div>
@@ -791,20 +843,68 @@ function eventForm(id) {
     </div>
   </div>`;
 }
+function onPricingTypeChange() {
+  const type = el("ef-pricingType").value;
+  el("ef-fuse-pricing-fields").style.display = type === "PAID_FUSE" ? "grid" : "none";
+  el("ef-external-pricing-fields").style.display = type === "PAID_EXTERNAL" ? "grid" : "none";
+  el("ef-rsvp-fields").style.display = (type === "FREE_RSVP" || type === "PAID_EXTERNAL") ? "grid" : "none";
+}
+async function showRsvpRoster(eventId, title) {
+  const wrap = el(`roster-wrap-${eventId}`);
+  if (!wrap) return;
+  if (wrap.innerHTML) { wrap.innerHTML = ""; return; }
+  wrap.innerHTML = `<div class="loading">Loading RSVPs…</div>`;
+  try {
+    const d = await apiGet(`/api/admin/explore/events/${eventId}/rsvps`);
+    if (!d.roster.length) { wrap.innerHTML = `<div class="empty">No RSVPs yet</div>`; return; }
+    wrap.innerHTML = `<div class="roster">
+      <div class="card-sub">${title} — ${d.goingCount} going · ${d.checkedInCount} checked in</div>
+      <table class="roster-table">
+        <thead><tr><th>Name</th><th>Phone</th><th>Status</th><th>Source</th></tr></thead>
+        <tbody>
+          ${d.roster.map(r => `<tr>
+            <td>${r.userName || "—"}</td>
+            <td>${r.userPhone || "—"}</td>
+            <td>${r.status === "CHECKED_IN" ? '<span class="badge badge-green">Checked in</span>' : '<span class="badge badge-amber">Going</span>'}</td>
+            <td>${r.source}</td>
+          </tr>`).join("")}
+        </tbody>
+      </table>
+    </div>`;
+  } catch (e) { wrap.innerHTML = `<div class="empty" style="color:var(--red)">${e.message}</div>`; }
+}
+async function regenerateCheckInCode(id) {
+  if (!id) { el("ef-checkInCode").value = String(Math.floor(1000 + Math.random() * 9000)); return; }
+  try {
+    const d = await apiPost(`/api/admin/explore/events/${id}/checkin-code/regenerate`, {});
+    el("ef-checkInCode").value = d.checkInCode;
+    toast("Check-in code regenerated ✓");
+  } catch (e) { toast(e.message, true); }
+}
 async function prefillEventForm(id) {
   try {
     const d = await apiGet(`/api/explore/events/${id}`);
     const e = d.event;
     el("ef-title").value = e.title || "";
-    el("ef-category").value = (e.category || "");
+    el("ef-category").value = e.category || "social";
+    el("ef-audience").value = e.audience || "MEET_PEOPLE";
+    el("ef-pricingType").value = e.pricingType || "PAID_FUSE";
     if (e.eventDate) el("ef-eventDate").value = new Date(e.eventDate).toISOString().slice(0,16);
     if (e.eventEndDate) el("ef-eventEndDate").value = new Date(e.eventEndDate).toISOString().slice(0,16);
     el("ef-venue").value = e.venue || "";
     el("ef-city").value = e.city || "Chennai";
     el("ef-ticketPrice").value = e.ticketPrice || "";
     el("ef-originalPrice").value = e.originalPrice || "";
-    el("ef-availableSlots").value = e.availableSlots ?? "";
+    el("ef-totalSlots").value = e.totalSlots ?? "";
     el("ef-maxPerOrder").value = e.maxPerOrder || 4;
+    el("ef-externalBookingUrl").value = e.externalBookingUrl || "";
+    el("ef-externalPrice").value = e.externalPrice || "";
+    el("ef-rsvpCap").value = e.rsvpCap ?? "";
+    el("ef-promoCode").value = e.promoCode || "";
+    el("ef-checkInCode").value = e.checkInCode || "";
+    el("ef-organizerName").value = e.organizer?.name || "";
+    el("ef-organizerInstagram").value = e.organizer?.instagram || "";
+    el("ef-organizerPhone").value = e.organizer?.phone || "";
     el("ef-images").value = (e.images || []).join(", ");
     el("ef-tags").value = (e.tags || []).join(", ");
     el("ef-description").value = e.description || "";
@@ -814,20 +914,34 @@ async function prefillEventForm(id) {
     el("ef-isFeatured").checked = e.isFeatured || false;
     el("ef-isSoldOut").checked = e.isSoldOut || false;
     el("ef-isActive").checked = e.isActive !== false;
+    onPricingTypeChange();
   } catch (e2) { toast(e2.message, true); }
 }
 async function saveEvent(id) {
+  const pricingType = el("ef-pricingType").value;
   const payload = {
     title: el("ef-title").value.trim(),
-    category: el("ef-category").value.trim(),
+    category: el("ef-category").value,
+    audience: el("ef-audience").value,
+    pricingType,
     eventDate: el("ef-eventDate").value,
     eventEndDate: el("ef-eventEndDate").value || undefined,
     venue: el("ef-venue").value.trim(),
     city: el("ef-city").value.trim() || "Chennai",
-    ticketPrice: Number(el("ef-ticketPrice").value),
+    ticketPrice: el("ef-ticketPrice").value ? Number(el("ef-ticketPrice").value) : undefined,
     originalPrice: Number(el("ef-originalPrice").value) || undefined,
-    availableSlots: Number(el("ef-availableSlots").value) || undefined,
+    totalSlots: el("ef-totalSlots").value ? Number(el("ef-totalSlots").value) : undefined,
     maxPerOrder: Number(el("ef-maxPerOrder").value) || 4,
+    externalBookingUrl: el("ef-externalBookingUrl").value.trim() || undefined,
+    externalPrice: el("ef-externalPrice").value.trim() || undefined,
+    rsvpCap: el("ef-rsvpCap").value ? Number(el("ef-rsvpCap").value) : null,
+    promoCode: el("ef-promoCode").value.trim() || undefined,
+    checkInCode: el("ef-checkInCode").value.trim() || undefined,
+    organizer: {
+      name: el("ef-organizerName").value.trim(),
+      instagram: el("ef-organizerInstagram").value.trim(),
+      phone: el("ef-organizerPhone").value.trim(),
+    },
     address: el("ef-address").value.trim(),
     images: el("ef-images").value.split(",").map(s=>s.trim()).filter(Boolean),
     tags: el("ef-tags").value.split(",").map(s=>s.trim()).filter(Boolean),
@@ -839,7 +953,8 @@ async function saveEvent(id) {
     isSoldOut: el("ef-isSoldOut").checked,
     isActive: el("ef-isActive").checked,
   };
-  if (!payload.title || !payload.eventDate || !payload.ticketPrice) return toast("Title, date, and price required", true);
+  if (!payload.title || !payload.eventDate) return toast("Title and date required", true);
+  if (pricingType === "PAID_FUSE" && !payload.ticketPrice) return toast("Ticket price required for Fuse-paid events", true);
   try {
     if (id) await apiPatch(`/api/admin/explore/events/${id}`, payload);
     else await apiPost("/api/admin/explore/events", payload);

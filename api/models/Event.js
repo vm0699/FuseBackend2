@@ -25,10 +25,11 @@ const eventSchema = new mongoose.Schema(
     images: [{ type: String }],
     tags: [{ type: String }],
 
-    // Ticketing
-    ticketPrice: { type: Number, required: true, min: 0 },   // Fuse resell price (INR)
+    // Ticketing (required only for pricingType: PAID_FUSE — enforced in AdminExploreController, not schema,
+    // because update-validators run with a different `this` and can't safely reference pricingType here)
+    ticketPrice: { type: Number, min: 0 },                    // Fuse resell price (INR)
     originalPrice: { type: Number },                          // organizer's price (for showing "Save ₹X")
-    totalSlots: { type: Number, required: true },
+    totalSlots: { type: Number },
     soldSlots: { type: Number, default: 0 },
     maxPerOrder: { type: Number, default: 4 },
 
@@ -39,11 +40,42 @@ const eventSchema = new mongoose.Schema(
     agePolicy: { type: String },    // e.g. "18+" or "All ages"
     dressCode: { type: String },
     importantInfo: { type: String },
+
+    // ===== Iteration 2: audience segmentation + social event aggregation =====
+    audience: {
+      type: String,
+      enum: ["DATE_IDEA", "MEET_PEOPLE"],
+      default: "MEET_PEOPLE",
+      index: true,
+    },
+    pricingType: {
+      type: String,
+      enum: ["FREE_RSVP", "PAID_EXTERNAL", "PAID_FUSE"],
+      default: "PAID_FUSE",
+    },
+    organizer: {
+      name: { type: String },
+      instagram: { type: String },
+      phone: { type: String },   // never serialized to the app
+    },
+    externalBookingUrl: { type: String },   // PAID_EXTERNAL: organizer's booking link
+    externalPrice: { type: String },        // PAID_EXTERNAL: display string, e.g. "₹499 onwards"
+    promoCode: { type: String },            // revealed to the app only after the viewer has RSVP'd
+
+    // Check-in (admin-only fields, never serialized to the app)
+    checkInCode: { type: String },
+    checkInOpensAt: { type: Date },
+    checkInClosesAt: { type: Date },
+
+    // RSVP capacity (FREE_RSVP / PAID_EXTERNAL circles)
+    rsvpCap: { type: Number, default: null },
+    rsvpCount: { type: Number, default: 0 },
   },
   { timestamps: true }
 );
 
 eventSchema.index({ isActive: 1, eventDate: 1, city: 1 });
 eventSchema.index({ isActive: 1, isFeatured: 1, eventDate: 1 });
+eventSchema.index({ isActive: 1, audience: 1, eventDate: 1, city: 1 });
 
 export default mongoose.model("Event", eventSchema);

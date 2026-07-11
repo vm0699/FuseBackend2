@@ -1,5 +1,6 @@
 import twilio from "twilio";
 import notificationService from "../services/notificationService.js";
+import VideoQueueEntry from "../models/VideoQueueEntry.js";
 
 const AccessToken = twilio.jwt.AccessToken;
 const VideoGrant = AccessToken.VideoGrant;
@@ -13,6 +14,21 @@ export const generateVideoToken = async (req, res) => {
       return res
         .status(400)
         .json({ success: false, message: "Missing identity or room" });
+    }
+
+    // 🔒 Only issue a token for a room the requester is actually matched
+    // into via the video queue — otherwise any authenticated user could
+    // mint a grant for any guessed/leaked room name.
+    const authorizedEntry = await VideoQueueEntry.findOne({
+      roomId: String(room),
+      status: "matched",
+      $or: [{ userId }, { matchedUserId: userId }],
+    }).lean();
+
+    if (!authorizedEntry) {
+      return res
+        .status(403)
+        .json({ success: false, message: "Not authorized for this room" });
     }
 
     if (

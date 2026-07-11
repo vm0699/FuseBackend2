@@ -4,7 +4,9 @@
  */
 import Venue from "../models/Venue.js";
 import Event from "../models/Event.js";
+import EventRsvp from "../models/EventRsvp.js";
 import GiftCatalogItem from "../models/GiftCatalogItem.js";
+import UserProfile from "../models/UserProfile.js";
 import { logEvent } from "../services/analytics/logEvent.js";
 
 // â”€â”€â”€ Home â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -13,13 +15,64 @@ export const getExploreHome = async (req, res) => {
   try {
     const city = process.env.FUSE_LAUNCH_CITY || "Chennai";
     const userId = req.user.id;
+    const mode = req.query.mode === "people" || req.query.mode === "dates" ? req.query.mode : null;
 
+    const me = await UserProfile.findById(userId).select("matches").lean();
+    const defaultMode = (me?.matches?.length || 0) > 0 ? "dates" : "people";
+
+    logEvent("explore_home_viewed", userId, { city, mode: mode || "legacy" });
+
+    if (mode === "people") {
+      const [myUpcomingEvents, thisWeekend, freeEvents, featuredSocial] = await Promise.all([
+        EventRsvp.find({ userId, status: { $in: ["GOING", "CHECKED_IN"] } })
+          .sort({ "eventSnapshot.eventDate": 1 })
+          .limit(10)
+          .lean()
+          .then((rsvps) => Event.find({ _id: { $in: rsvps.map((r) => r.eventId) } }).lean()),
+        Event.find({
+          isActive: true,
+          city,
+          audience: "MEET_PEOPLE",
+          eventDate: { $gte: new Date(), $lte: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000) },
+        }).sort({ eventDate: 1 }).limit(6).lean(),
+        Event.find({
+          isActive: true,
+          city,
+          audience: "MEET_PEOPLE",
+          pricingType: "FREE_RSVP",
+          eventDate: { $gte: new Date() },
+        }).sort({ eventDate: 1 }).limit(6).lean(),
+        Event.find({
+          isActive: true,
+          city,
+          audience: "MEET_PEOPLE",
+          isFeatured: true,
+          eventDate: { $gte: new Date() },
+        }).sort({ eventDate: 1 }).limit(6).lean(),
+      ]);
+
+      return res.json({
+        success: true,
+        city,
+        mode: "people",
+        defaultMode,
+        home: {
+          myUpcomingEvents: myUpcomingEvents.map(serializeEvent),
+          thisWeekend: thisWeekend.map(serializeEvent),
+          freeEvents: freeEvents.map(serializeEvent),
+          featuredSocial: featuredSocial.map(serializeEvent),
+        },
+      });
+    }
+
+    // "dates" mode, and the legacy no-mode call (kept byte-identical below + defaultMode appended)
     const [featuredVenues, upcomingEvents, giftSuggestions, featuredEvents] =
       await Promise.all([
         Venue.find({ isActive: true, city }).sort({ sortOrder: 1 }).limit(5).lean(),
         Event.find({
           isActive: true,
           city,
+          ...(mode === "dates" ? { audience: "DATE_IDEA" } : {}),
           eventDate: { $gte: new Date() },
         })
           .sort({ eventDate: 1 })
@@ -29,17 +82,23 @@ export const getExploreHome = async (req, res) => {
           .sort({ sortOrder: 1 })
           .limit(4)
           .lean(),
-        Event.find({ isActive: true, city, isFeatured: true, eventDate: { $gte: new Date() } })
+        Event.find({
+          isActive: true,
+          city,
+          isFeatured: true,
+          ...(mode === "dates" ? { audience: "DATE_IDEA" } : {}),
+          eventDate: { $gte: new Date() },
+        })
           .sort({ eventDate: 1 })
           .limit(3)
           .lean(),
       ]);
 
-    logEvent("explore_home_viewed", userId, { city });
-
     res.json({
       success: true,
       city,
+      ...(mode ? { mode } : {}),
+      defaultMode,
       home: {
         featuredVenues: featuredVenues.map(serializeVenue),
         upcomingEvents: upcomingEvents.map(serializeEvent),
@@ -105,10 +164,12 @@ export const getEvents = async (req, res) => {
   try {
     const city = process.env.FUSE_LAUNCH_CITY || "Chennai";
     const userId = req.user.id;
-    const { category, limit = 20, offset = 0 } = req.query;
+    const { category, audience, pricingType, limit = 20, offset = 0 } = req.query;
 
     const filter = { isActive: true, city, eventDate: { $gte: new Date() } };
     if (category) filter.category = category;
+    if (audience) filter.audience = audience;
+    if (pricingType) filter.pricingType = pricingType;
 
     const events = await Event.find(filter)
       .sort({ eventDate: 1 })
@@ -138,7 +199,17 @@ export const getEventDetail = async (req, res) => {
       category: event.category,
     });
 
-    res.json({ success: true, event: serializeEventDetail(event) });
+    const myRsvp = await EventRsvp.findOne({ userId, eventId }).lean();
+    const hasActiveRsvp = myRsvp && ["GOING", "CHECKED_IN"].includes(myRsvp.status);
+
+    res.json({
+      success: true,
+      event: {
+        ...serializeEventDetail(event),
+        myRsvp: hasActiveRsvp ? { status: myRsvp.status, showMeInCircle: myRsvp.showMeInCircle } : null,
+        promoCode: hasActiveRsvp && event.pricingType === "PAID_EXTERNAL" ? event.promoCode : undefined,
+      },
+    });
   } catch (err) {
     console.error("[ExploreController] getEventDetail:", err);
     res.status(500).json({ success: false, message: "Failed to load event." });
@@ -186,10 +257,24 @@ const serializeEvent = (e) => ({
   ticketPrice: e.ticketPrice,
   originalPrice: e.originalPrice,
   savingsAmount: e.originalPrice > e.ticketPrice ? e.originalPrice - e.ticketPrice : 0,
-  availableSlots: Math.max(0, (e.totalSlots || 0) - (e.soldSlots || 0)),
-  isSoldOut: (e.soldSlots || 0) >= (e.totalSlots || 0),
+  availableSlots: e.totalSlots != null ? Math.max(0, e.totalSlots - (e.soldSlots || 0)) : null,
+  isSoldOut:
+    e.totalSlots != null
+      ? (e.soldSlots || 0) >= e.totalSlots
+      : e.rsvpCap != null
+      ? (e.rsvpCount || 0) >= e.rsvpCap
+      : false,
   isFeatured: e.isFeatured,
   agePolicy: e.agePolicy,
+  // ─── Iteration 2 fields ───
+  audience: e.audience || "MEET_PEOPLE",
+  pricingType: e.pricingType || "PAID_FUSE",
+  organizer: e.organizer?.name ? { name: e.organizer.name, instagram: e.organizer.instagram } : undefined,
+  externalBookingUrl: e.pricingType === "PAID_EXTERNAL" ? e.externalBookingUrl : undefined,
+  externalPrice: e.externalPrice,
+  rsvpCap: e.rsvpCap ?? null,
+  goingCount: e.rsvpCount || 0,
+  // checkInCode, organizer.phone, and promoCode are never included here (admin/viewer-gated only).
 });
 
 const serializeEventDetail = (e) => ({

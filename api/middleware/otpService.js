@@ -35,7 +35,7 @@ export const verifyOTP = async (phoneNumber, code) => {
     formattedPhoneNumber = formattedPhoneNumber.replace(/^(\+91)(\+91)?/, '+91'); // Fix duplicate +91 issue
     formattedPhoneNumber = formattedPhoneNumber.replace(/\s+/g, ''); // Remove spaces
 
-    console.log(`✅ Verifying OTP for: ${formattedPhoneNumber}, Code: ${code}`);
+    console.log(`✅ Verifying OTP for: ${formattedPhoneNumber}`);
 
     const result = await client.verify.v2.services(verifyServiceSid)
       .verificationChecks

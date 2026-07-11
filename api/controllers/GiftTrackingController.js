@@ -3,6 +3,7 @@ import GiftPayment from "../models/GiftPaymentModel.js";
 import notificationService from "../services/notificationService.js";
 import { NOTIFICATION_TYPES } from "../services/notifications/notificationTypes.js";
 import { serializeOrderForViewer } from "../services/giftOrderService.js";
+import { alertGiftRefundRequired } from "../services/opsAlertService.js";
 
 // Recipient may decline only before fulfilment.
 const DECLINABLE_STATUSES = ["PAID", "ADMIN_REVIEW", "APPROVED", "PROCESSING"];
@@ -183,6 +184,14 @@ export const declineGiftOrder = async (req, res) => {
         })
       )
       .catch((e) => console.error("[GIFT] decline notify failed", e));
+
+    // A paid gift was declined — refund is owed. Ops must see this (no
+    // gateway auto-refund exists yet; this is what makes it visible).
+    if (newStatus === "REFUND_REQUIRED") {
+      alertGiftRefundRequired(order).catch((e) =>
+        console.error("[GIFT] refund ops alert failed", e)
+      );
+    }
 
     return res.status(200).json({
       success: true,

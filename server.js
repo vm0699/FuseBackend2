@@ -6,6 +6,7 @@ import express from 'express';
 import dotenv from 'dotenv';
 import cors from 'cors';
 import http from 'http';
+import jwt from 'jsonwebtoken';
 import { Server } from 'socket.io';
 import connectDB from './api/config/db.js';
 import profileRoutes from './api/routes/ProfileRoutes.js';
@@ -48,6 +49,13 @@ const client = twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN);
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+
+// Razorpay webhook signature verification needs the exact raw request bytes,
+// not the parsed-and-reserialized body, so this one path gets a raw Buffer
+// body instead of JSON. Must be registered BEFORE the global express.json()
+// below — body-parser skips re-parsing once req._body is already set, so
+// every other route is unaffected.
+app.use('/api/gifts/razorpay/webhook', express.raw({ type: 'application/json' }));
 
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
@@ -537,11 +545,41 @@ setInterval(() => {
 }, VIDEO_QUEUE_CLEANUP_INTERVAL_MS);
 setInterval(cleanupExpiredVideoJoinBuckets, 60 * 1000).unref();
 
-io.on("connection", (socket) => {
-  logVideoQueueEvent("socket_connected", { socketId: socket.id });
+// 🔒 Authenticate every socket connection with the same JWT used for HTTP
+// requests. The verified id becomes socket.data.userId and is the ONLY
+// source of truth for identity from here on — client-supplied userId in
+// event payloads is never trusted (it previously allowed joining/leaving
+// the video queue, and receiving matches, as an arbitrary user).
+io.use((socket, next) => {
+  try {
+    const token =
+      socket.handshake.auth?.token ||
+      socket.handshake.query?.token ||
+      String(socket.handshake.headers?.authorization || "").replace(/^Bearer\s+/i, "");
 
-  socket.on("join_video_queue", async ({ userId, interests }) => {
+    if (!token) {
+      return next(new Error("Unauthorized: no token"));
+    }
+
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    if (!decoded?.id) {
+      return next(new Error("Unauthorized: invalid token"));
+    }
+
+    socket.data.userId = String(decoded.id);
+    next();
+  } catch (error) {
+    next(new Error("Unauthorized: invalid or expired token"));
+  }
+});
+
+io.on("connection", (socket) => {
+  logVideoQueueEvent("socket_connected", { socketId: socket.id, userId: socket.data.userId });
+
+  socket.on("join_video_queue", async ({ interests } = {}) => {
     try {
+      const userId = socket.data.userId;
+
       logVideoQueueEvent("socket_join_event", {
         socketId: socket.id,
         userId: String(userId || ""),
@@ -549,11 +587,11 @@ io.on("connection", (socket) => {
       });
 
       if (!userId) {
-        socket.emit("queue_error", { message: "Missing userId" });
+        socket.emit("queue_error", { message: "Unauthorized" });
         return;
       }
 
-      const rateLimitKey = `video-join:${String(userId)}`;
+      const rateLimitKey = `video-join:${userId}`;
       const now = Date.now();
       const currentBucket = videoQueueJoinBuckets.get(rateLimitKey);
 
@@ -574,11 +612,11 @@ io.on("connection", (socket) => {
         videoQueueJoinBuckets.set(rateLimitKey, currentBucket);
       }
 
-      socket.data.videoUserId = String(userId);
+      socket.data.videoUserId = userId;
       socket.join(`video-user:${socket.data.videoUserId}`);
 
       const result = await joinVideoQueue({
-        userId: String(userId),
+        userId,
         socketId: socket.id,
         interests,
       });
@@ -626,9 +664,9 @@ io.on("connection", (socket) => {
     }
   });
 
-  socket.on("leave_video_queue", async ({ userId, reason }) => {
+  socket.on("leave_video_queue", async ({ reason } = {}) => {
     try {
-      const resolvedUserId = String(userId || socket.data.videoUserId || "");
+      const resolvedUserId = socket.data.userId || socket.data.videoUserId || "";
       if (!resolvedUserId) return;
       logVideoQueueEvent("socket_leave_event", {
         socketId: socket.id,

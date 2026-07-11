@@ -1,4 +1,5 @@
 import crypto from "crypto";
+import Razorpay from "razorpay";
 
 /**
  * Gift payment adapter.
@@ -9,11 +10,21 @@ import crypto from "crypto";
  * Mode is driven by GIFT_PAYMENT_MODE:
  *   - "PLACEHOLDER" (default): no real money; dev/testing only.
  *   - "RAZORPAY": creates real provider orders + verifies signatures.
- *     (Stubbed until RAZORPAY_KEY_ID/SECRET + the native SDK are wired.)
  */
 export const getGiftPaymentMode = () => {
   const mode = String(process.env.GIFT_PAYMENT_MODE || "PLACEHOLDER").toUpperCase();
   return mode === "RAZORPAY" ? "RAZORPAY" : "PLACEHOLDER";
+};
+
+const getRazorpayInstance = () => {
+  const keyId = process.env.RAZORPAY_KEY_ID;
+  const keySecret = process.env.RAZORPAY_KEY_SECRET;
+  if (!keyId || !keySecret) {
+    throw new Error(
+      "GIFT_PAYMENT_MODE=RAZORPAY but RAZORPAY_KEY_ID/RAZORPAY_KEY_SECRET are not set"
+    );
+  }
+  return new Razorpay({ key_id: keyId, key_secret: keySecret });
 };
 
 /**
@@ -24,18 +35,21 @@ export const createGiftPayment = async ({ amount, currency = "INR", intentId }) 
   const mode = getGiftPaymentMode();
 
   if (mode === "RAZORPAY") {
-    const keyId = process.env.RAZORPAY_KEY_ID;
-    const keySecret = process.env.RAZORPAY_KEY_SECRET;
-    if (!keyId || !keySecret) {
-      throw new Error(
-        "GIFT_PAYMENT_MODE=RAZORPAY but RAZORPAY_KEY_ID/RAZORPAY_KEY_SECRET are not set"
-      );
-    }
-    // TODO: integrate the Razorpay SDK here once keys + native checkout exist.
-    //   const rzp = new Razorpay({ key_id: keyId, key_secret: keySecret });
-    //   const order = await rzp.orders.create({ amount: amount * 100, currency, receipt: String(intentId) });
-    //   return { mode, provider: "RAZORPAY", providerOrderId: order.id, amount, currency, keyId };
-    throw new Error("RAZORPAY provider not yet implemented");
+    const rzp = getRazorpayInstance();
+    const order = await rzp.orders.create({
+      amount: Math.round(amount * 100), // Razorpay uses paise
+      currency,
+      receipt: String(intentId),
+      notes: { intentId: String(intentId), source: "FUSE_GIFT" },
+    });
+    return {
+      mode: "RAZORPAY",
+      provider: "RAZORPAY",
+      providerOrderId: order.id,
+      amount,
+      currency,
+      keyId: process.env.RAZORPAY_KEY_ID,
+    };
   }
 
   // PLACEHOLDER: synthesize a deterministic-looking order id.

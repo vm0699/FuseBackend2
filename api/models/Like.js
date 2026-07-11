@@ -16,6 +16,17 @@ const likeSchema = new mongoose.Schema({
     enum: ["pending", "matched", "closed"],
     default: "pending",
   },
+  // Attribution only (Explore Iteration 2) — never read by swipeStateMachine.
+  source: {
+    type: String,
+    enum: ["swipe", "event_wave"],
+    default: "swipe",
+  },
+  eventId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: "Event",
+    default: null,
+  },
   createdAt: {
     type: Date,
     default: Date.now,

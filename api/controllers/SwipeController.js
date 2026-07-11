@@ -3,12 +3,9 @@ import Chat from "../models/ChatModel.js";
 import UserProfile from "../models/UserProfile.js";
 import SwipeRecord from "../models/SwipeRecord.js";
 import { deriveSwipeState, getSwipeTransition } from "../lib/swipeStateMachine.js";
-import { ensureChatTwilioChannel } from "../services/chatTwilioService.js";
+import { normalizePairKey, buildMatchResponse, writeMatchState } from "../services/matchService.js";
 
 const ACTIVE_CHAT_STATUSES = ["pending", "accepted"];
-
-const normalizePairKey = (firstUserId, secondUserId) =>
-  [firstUserId.toString(), secondUserId.toString()].sort().join("|");
 
 const buildNoMatchResponse = ({
   swipeState,
@@ -19,87 +16,6 @@ const buildNoMatchResponse = ({
   isMatch: false,
   swipeState,
 });
-
-const resolveActiveChatForPair = async ({ pairKey, userAId, userBId }) => {
-  let chat = await Chat.findOne({
-    pairKey,
-    status: { $in: ACTIVE_CHAT_STATUSES },
-  });
-
-  if (!chat) {
-    try {
-      chat = await Chat.create({
-        senderId: userAId,
-        receiverId: userBId,
-        status: "accepted",
-        pairKey,
-        participants: [userAId, userBId],
-        lastActivityAt: new Date(),
-      });
-    } catch (err) {
-      if (err?.code !== 11000) {
-        throw err;
-      }
-
-      chat = await Chat.findOne({
-        pairKey,
-        status: { $in: ACTIVE_CHAT_STATUSES },
-      });
-    }
-  } else if (chat.status === "pending") {
-    chat.status = "accepted";
-    chat.participants = [userAId, userBId];
-    chat.lastActivityAt = new Date();
-    await chat.save();
-  }
-
-  return chat;
-};
-
-const buildMatchResponse = async ({
-  loggedInUserId,
-  swipedUserId,
-  swipedUser,
-  pairKey,
-  existingChat = null,
-}) => {
-  const chat =
-    existingChat ||
-    (await resolveActiveChatForPair({
-      pairKey,
-      userAId: loggedInUserId,
-      userBId: swipedUserId,
-    }));
-
-  if (!chat) {
-    throw new Error("Failed to resolve active chat for matched pair");
-  }
-
-  try {
-    await ensureChatTwilioChannel({
-      chat,
-      userAId: loggedInUserId,
-      userBId: swipedUserId,
-    });
-  } catch (error) {
-    console.log("Twilio channel provisioning skipped:", error?.message || error);
-  }
-
-  return {
-    success: true,
-    message: "Swipe recorded successfully",
-    isMatch: true,
-    swipeState: "matched",
-    chatId: chat._id,
-    twilioChannelSid:
-      chat?.twilioChannelSid || chat?.twilioChatChannelSid || null,
-    otherUser: {
-      _id: swipedUser._id,
-      name: swipedUser.name,
-      photos: swipedUser.photos || [],
-    },
-  };
-};
 
 export const handleSwipe = async (req, res) => {
   try {
@@ -248,37 +164,7 @@ export const handleSwipe = async (req, res) => {
         .json(buildNoMatchResponse({ swipeState: "liked_pending" }));
     }
 
-    await Promise.all([
-      UserProfile.updateOne(
-        { _id: loggedInUserId },
-        {
-          $addToSet: {
-            swipedRight: swipedUserId,
-            matches: swipedUserId,
-          },
-          $pull: { swipedLeft: swipedUserId },
-        }
-      ),
-      UserProfile.updateOne(
-        { _id: swipedUserId },
-        {
-          $addToSet: {
-            swipedRight: loggedInUserId,
-            matches: loggedInUserId,
-          },
-          $pull: { swipedLeft: loggedInUserId },
-        }
-      ),
-      Like.updateMany(
-        {
-          $or: [
-            { likerId: loggedInUserId, likedUserId: swipedUserId },
-            { likerId: swipedUserId, likedUserId: loggedInUserId },
-          ],
-        },
-        { $set: { status: "matched" } }
-      ),
-    ]);
+    await writeMatchState({ userAId: loggedInUserId, userBId: swipedUserId });
 
     return res.status(200).json(
       await buildMatchResponse({

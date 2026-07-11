@@ -3,6 +3,8 @@ import Like from '../models/Like.js';
 import Chat from '../models/ChatModel.js';
 import Block from "../models/Block.js";
 import SwipeRecord from '../models/SwipeRecord.js';
+import EventRsvp from '../models/EventRsvp.js';
+import { getCachedDeck, setCachedDeck } from '../services/discoveryDeckCache.js';
 import { DeleteObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import client from "../config/twilio.js";
 import fs from 'fs';
@@ -518,8 +520,6 @@ const MAX_DISCOVERY_LIMIT = 20;
 const MAX_DISCOVERY_CANDIDATES = 200;
 const EARTH_RADIUS_KM = 6371;
 const DEG_TO_RAD = Math.PI / 180;
-const CACHE_TTL_MS = 15 * 60 * 1000;
-const CACHE_CLEANUP_INTERVAL_MS = 5 * 60 * 1000;
 
 const DISCOVERY_PROFILE_SELECT = [
   "_id",
@@ -560,33 +560,6 @@ const DISCOVERY_PROFILE_SELECT = [
   "updatedAt",
 ].join(" ");
 
-// ===== IN-MEMORY DECK CACHE (15-min TTL per user+filters) =====
-const discoveryDeckCache = new Map();
-
-setInterval(() => {
-  const now = Date.now();
-  for (const [key, entry] of discoveryDeckCache.entries()) {
-    if (now > entry.expiresAt) discoveryDeckCache.delete(key);
-  }
-}, CACHE_CLEANUP_INTERVAL_MS);
-
-function getCachedDeck(userId, filtersKey) {
-  const entry = discoveryDeckCache.get(userId);
-  if (!entry || Date.now() > entry.expiresAt || entry.filtersKey !== filtersKey) {
-    discoveryDeckCache.delete(userId);
-    return null;
-  }
-  return entry.deck;
-}
-
-function setCachedDeck(userId, deck, filtersKey) {
-  discoveryDeckCache.set(userId, {
-    deck,
-    filtersKey,
-    expiresAt: Date.now() + CACHE_TTL_MS,
-  });
-}
-
 // ===== UTILITY FUNCTIONS =====
 
 function parseDiscoveryNumber(value, fallback) {
@@ -623,6 +596,10 @@ function normalizeDiscoveryFilters(rawFilters, fallbackInterests = []) {
     smoking: safeStringArray(safeFilters.smoking),
     // Hard cutoff: only show profiles active in the last 7 days
     activeOnly: Boolean(safeFilters.activeOnly),
+    // Event-based discovery scope (Explore Iteration 2): EVERYONE | EVENT_GOERS | MY_CIRCLES
+    eventScope: ["EVENT_GOERS", "MY_CIRCLES"].includes(safeFilters.eventScope)
+      ? safeFilters.eventScope
+      : "EVERYONE",
   };
 }
 
@@ -705,7 +682,7 @@ async function getSwipedProfileIds(userId, fallbackSwipedUserIds) {
 // Priority: activity recency → shared interests → lifestyle match → distance → age.
 // All filters are soft preferences — matching profiles rank higher but nothing is hard excluded
 // (except activeOnly which is applied as a DB filter before this function runs).
-function scoreAndRankCandidates({ candidates, requester, filters }) {
+function scoreAndRankCandidates({ candidates, requester, filters, sharedEventMap = {} }) {
   // Additive interests: filter interests + profile interests both contribute to scoring
   const effectiveInterests = [
     ...new Set([...(requester.interests || []), ...(filters.interests || [])]),
@@ -768,11 +745,17 @@ function scoreAndRankCandidates({ candidates, requester, filters }) {
       }
     }
 
+    // Shared event within the last 48h (Explore Iteration 2 — "you were both at X")
+    const sharedEventTitle = sharedEventMap[c._id.toString()] || null;
+    const sharedEventScore = sharedEventTitle ? 250 : 0;
+
     return {
       ...c,
-      _discoveryScore: activityScore + interestScore + lifestyleScore + distanceScore + ageScore,
+      _discoveryScore:
+        activityScore + interestScore + lifestyleScore + distanceScore + ageScore + sharedEventScore,
       _sharedInterestCount: sharedCount,
       _distanceKm: distKm,
+      _sharedEventTitle: sharedEventTitle,
     };
   });
 
@@ -821,13 +804,71 @@ async function buildDiscoveryDeck({ requester, filters, excludeSwiped = true }) 
     baseMatch.lastActiveAt = { $gte: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000) };
   }
 
+  // Event-based discovery scope (Explore Iteration 2)
+  if (filters.eventScope === "EVENT_GOERS") {
+    baseMatch["eventStats.checkInCount"] = { $gte: 1 };
+  } else if (filters.eventScope === "MY_CIRCLES") {
+    const myEventIds = await EventRsvp.find({
+      userId: requester._id,
+      status: { $in: ["GOING", "CHECKED_IN"] },
+    }).distinct("eventId");
+
+    if (myEventIds.length === 0) return [];
+
+    const circleUserIds = await EventRsvp.find({
+      eventId: { $in: myEventIds },
+      status: { $in: ["GOING", "CHECKED_IN"] },
+      showMeInCircle: true,
+      userId: { $ne: requester._id },
+    }).distinct("userId");
+
+    if (circleUserIds.length === 0) return [];
+    baseMatch._id.$in = circleUserIds;
+  }
+
   const candidates = await UserProfile.find(baseMatch)
     .select(DISCOVERY_PROFILE_SELECT)
     .sort({ lastActiveAt: -1, updatedAt: -1, _id: -1 })
     .limit(MAX_DISCOVERY_CANDIDATES)
     .lean();
 
-  return scoreAndRankCandidates({ candidates, requester, filters });
+  const sharedEventMap = await buildSharedEventMap(requester._id, candidates);
+
+  return scoreAndRankCandidates({ candidates, requester, filters, sharedEventMap });
+}
+
+// "You were both at X" — checked into the same event within the last 48h.
+async function buildSharedEventMap(requesterId, candidates) {
+  if (candidates.length === 0) return {};
+
+  const cutoff = new Date(Date.now() - 48 * 60 * 60 * 1000);
+  const myRecentCheckIns = await EventRsvp.find({
+    userId: requesterId,
+    status: "CHECKED_IN",
+    checkedInAt: { $gte: cutoff },
+  })
+    .select("eventId eventSnapshot")
+    .lean();
+
+  if (myRecentCheckIns.length === 0) return {};
+
+  const eventTitleById = new Map(myRecentCheckIns.map((r) => [r.eventId.toString(), r.eventSnapshot?.title]));
+  const candidateIds = candidates.map((c) => c._id);
+
+  const theirCheckIns = await EventRsvp.find({
+    userId: { $in: candidateIds },
+    eventId: { $in: myRecentCheckIns.map((r) => r.eventId) },
+    status: "CHECKED_IN",
+  })
+    .select("userId eventId")
+    .lean();
+
+  const map = {};
+  for (const r of theirCheckIns) {
+    const title = eventTitleById.get(r.eventId.toString());
+    if (title) map[r.userId.toString()] = title;
+  }
+  return map;
 }
 
 export const getFilteredProfiles = async (req, res) => {
@@ -942,6 +983,7 @@ function mapProfiles(users) {
     sharedInterestCount: user._sharedInterestCount || 0,
     distanceKm: typeof user._distanceKm === "number" ? Number(user._distanceKm.toFixed(1)) : null,
     activityLabel: getActivityLabel(user.lastActiveAt),
+    sharedEventTitle: user._sharedEventTitle || null,
   }));
 }
 

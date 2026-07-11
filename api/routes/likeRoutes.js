@@ -1,9 +1,24 @@
 import { Router } from "express";
 import Like from "../models/Like.js";
 import Chat from "../models/ChatModel.js";
+import Block from "../models/Block.js";
 import authMiddleware from "../middleware/authMiddleware.js";
 
 const router = Router();
+
+const getBlockedCounterpartIds = async (userId) => {
+  const blocks = await Block.find({
+    $or: [{ blockerId: userId }, { blockedId: userId }],
+  }).lean();
+
+  return new Set(
+    blocks.map((block) =>
+      block.blockerId?.toString() === userId.toString()
+        ? block.blockedId?.toString()
+        : block.blockerId?.toString()
+    )
+  );
+};
 
 const getChatPreviewMessage = (chat) => {
   if (chat?.lastMessageSummary && chat?.lastMessageAt) {
@@ -50,13 +65,16 @@ router.get("/likedyou", authMiddleware, async (req, res) => {
   try {
     const userId = req.user.id;
 
-    const existingChats = await Chat.find({
-      $or: [{ senderId: userId }, { receiverId: userId }],
-    })
-      .select("senderId receiverId")
-      .lean();
+    const [existingChats, blockedCounterpartIds] = await Promise.all([
+      Chat.find({
+        $or: [{ senderId: userId }, { receiverId: userId }],
+      })
+        .select("senderId receiverId")
+        .lean(),
+      getBlockedCounterpartIds(userId),
+    ]);
 
-    const excludedUserIds = new Set();
+    const excludedUserIds = new Set(blockedCounterpartIds);
     for (const chat of existingChats) {
       if (chat.senderId?.toString() !== userId) {
         excludedUserIds.add(chat.senderId?.toString());
@@ -136,6 +154,9 @@ router.get("/likedyou", authMiddleware, async (req, res) => {
       .map((chat) => {
         const sender = chat.senderId;
         if (!sender) return null;
+        if (blockedCounterpartIds.has(sender._id?.toString())) {
+          return null;
+        }
 
         const lastMsg = getChatPreviewMessage(chat);
 

@@ -1,6 +1,11 @@
 import UserProfile from '../models/UserProfile.js';
 import Like from '../models/Like.js';
 import Chat from '../models/ChatModel.js';
+import Message from '../models/MessageModel.js';
+import SwipeRecord from '../models/SwipeRecord.js';
+import Block from '../models/Block.js';
+import Report from '../models/Report.js';
+import DeviceToken from '../models/DeviceToken.js';
 import { DeleteObjectCommand } from '@aws-sdk/client-s3';
 import { S3Client } from '@aws-sdk/client-s3';
 
@@ -184,12 +189,38 @@ export const deleteAccount = async (req, res) => {
       $or: [{ likerId: userId }, { likedUserId: userId }],
     });
 
-    // 3. Delete all chats involving this user
+    // 3. Delete all chats involving this user, and the messages inside them
+    //    (captured before the chats are removed so they can be targeted by chatId)
+    const userChats = await Chat.find({
+      $or: [{ senderId: userId }, { receiverId: userId }],
+    }).select('_id');
+    const userChatIds = userChats.map((chat) => chat._id);
+
+    if (userChatIds.length > 0) {
+      await Message.deleteMany({ chatId: { $in: userChatIds } });
+    }
+
     await Chat.deleteMany({
       $or: [{ senderId: userId }, { receiverId: userId }],
     });
 
-    // 4. Clean references from other user profiles
+    // 4. Delete swipe records, blocks, and reports involving this user
+    //    (both directions — a deleted user should leave no trace either way)
+    await SwipeRecord.deleteMany({
+      $or: [{ swiperId: userId }, { swipedId: userId }],
+    });
+    await Block.deleteMany({
+      $or: [{ blockerId: userId }, { blockedId: userId }],
+    });
+    await Report.deleteMany({
+      $or: [{ reporterId: userId }, { reportedUserId: userId }],
+    });
+
+    // 5. Delete registered push tokens so notifications are never sent to a
+    //    deleted user
+    await DeviceToken.deleteMany({ userId });
+
+    // 6. Clean references from other user profiles
     await UserProfile.updateMany(
       {},
       {
@@ -202,7 +233,7 @@ export const deleteAccount = async (req, res) => {
       }
     );
 
-    // 5. Delete user's uploaded photos from S3
+    // 7. Delete user's uploaded photos from S3
     if (user.photos && user.photos.length > 0) {
       const deletePromises = user.photos.map((url) => {
         const key = extractS3KeyFromUrl(url);

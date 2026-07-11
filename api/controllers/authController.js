@@ -43,38 +43,17 @@ export const verifyPhoneNumber = async (req, res) => {
         username: user.username,
       });
 
-      const accessToken = jwt.sign(
-        {
-          id: user._id.toString(),
-          phoneNumber: user.phoneNumber,
-          username: user.username || "",
-        },
-        process.env.JWT_SECRET,
-        { expiresIn: "1h" }
-      );
-
-      const refreshToken = jwt.sign(
-        {
-          id: user._id.toString(),
-          phoneNumber: user.phoneNumber,
-          username: user.username || "",
-        },
-        process.env.JWT_REFRESH_SECRET,
-        { expiresIn: "7d" }
-      );
-
+      // 🔒 SECURITY: tokens must NOT be issued here — this step only sends the
+      // OTP and has not verified anything yet. Tokens are issued exclusively
+      // in verifyCode(), after Twilio confirms the code is correct.
       console.log("📤 [verifyPhoneNumber] Sending OTP for EXISTING user…");
       await sendOTP(formattedPhone);
       console.log("✅ [verifyPhoneNumber] OTP sent to existing user");
-
-      console.log("🔑 [verifyPhoneNumber] Tokens issued for EXISTING user");
 
       return res.status(200).json({
         success: true,
         message: "OTP sent.",
         data: {
-          accessToken,
-          refreshToken,
           exists: true,
           onboardingStage: user.onboardingStage,
           user: {
@@ -85,41 +64,13 @@ export const verifyPhoneNumber = async (req, res) => {
       });
     }
 
-    // 🆕 NEW USER
-    console.log("🆕 [verifyPhoneNumber] Creating new user…");
-
-    const newUser = await UserProfile.create({
-      phoneNumber: formattedPhone,
-      onboardingStage: "PHONE_VERIFIED",
-      username: null,
-    });
-
-    console.log("🆕 [verifyPhoneNumber] New user created:", {
-      id: newUser._id.toString(),
-      onboardingStage: newUser.onboardingStage,
-    });
-
-    const accessToken = jwt.sign(
-      {
-        id: newUser._id.toString(),
-        phoneNumber: newUser.phoneNumber,
-        username: "",
-      },
-      process.env.JWT_SECRET,
-      { expiresIn: "1h" }
-    );
-
-    const refreshToken = jwt.sign(
-      {
-        id: newUser._id.toString(),
-        phoneNumber: newUser.phoneNumber,
-        username: "",
-      },
-      process.env.JWT_REFRESH_SECRET,
-      { expiresIn: "7d" }
-    );
-
-    console.log("📤 [verifyPhoneNumber] Sending OTP for NEW user…");
+    // 🆕 NO ACCOUNT FOR THIS NUMBER YET
+    // 🔒 SECURITY: do NOT create the UserProfile row here — this step has not
+    // verified anything yet. Creating it here let anyone flood the DB with
+    // unverified accounts and squat a phone number (unique index) before its
+    // real owner ever verifies. The row is now created in verifyCode(), and
+    // only after Twilio confirms the code is correct.
+    console.log("📤 [verifyPhoneNumber] Sending OTP for new number…");
     await sendOTP(formattedPhone);
     console.log("✅ [verifyPhoneNumber] OTP sent");
 
@@ -127,14 +78,9 @@ export const verifyPhoneNumber = async (req, res) => {
       success: true,
       message: "OTP sent.",
       data: {
-        accessToken,
-        refreshToken,
         exists: false,
         onboardingStage: "PHONE_VERIFIED",
-        user: {
-          id: newUser._id.toString(),
-          username: "",
-        },
+        user: null,
       },
     });
   } catch (error) {
@@ -153,7 +99,7 @@ export const verifyPhoneNumber = async (req, res) => {
 export const verifyCode = async (req, res) => {
   const { phoneNumber, code } = req.body;
 
-  console.log("🔐 [verifyCode] Incoming:", { phoneNumber, code });
+  console.log("🔐 [verifyCode] Incoming:", { phoneNumber, code: code ? "[REDACTED]" : code });
 
   if (!phoneNumber || !code) {
     console.log("❌ [verifyCode] Missing phone or code");
@@ -181,15 +127,20 @@ export const verifyCode = async (req, res) => {
       });
     }
 
-    const user = await UserProfile.findOne({ phoneNumber: formattedPhone });
-
-    if (!user) {
-      console.log("❌ [verifyCode] User not found after OTP");
-      return res.status(404).json({
-        success: false,
-        message: "User not found.",
-      });
-    }
+    // 🔒 Account is created here — the first time this number is confirmed to
+    // be verified — never before. Atomic upsert avoids a duplicate-key race
+    // if this endpoint is somehow hit twice concurrently for the same number.
+    const user = await UserProfile.findOneAndUpdate(
+      { phoneNumber: formattedPhone },
+      {
+        $setOnInsert: {
+          phoneNumber: formattedPhone,
+          onboardingStage: "PHONE_VERIFIED",
+          username: null,
+        },
+      },
+      { upsert: true, new: true, setDefaultsOnInsert: true }
+    );
 
     console.log("👤 [verifyCode] User verified:", {
       id: user._id.toString(),
@@ -295,7 +246,7 @@ export const sendEmailOTPHandler = async (req, res) => {
 export const verifyEmailOTPHandler = async (req, res) => {
   const { email, code } = req.body;
 
-  console.log("🔐 [verifyEmailOTP] Incoming:", { email, code });
+  console.log("🔐 [verifyEmailOTP] Incoming:", { email, code: code ? "[REDACTED]" : code });
 
   if (!email || !code) {
     return res.status(400).json({

@@ -78,7 +78,8 @@ const daysAgo = (n) => new Date(Date.now() - n * 24 * 60 * 60 * 1000);
 
 /**
  * Rate limits. Counts gift orders the sender has created in each window
- * (cancelled orders don't count against the user).
+ * (cancelled, declined, and refunded orders don't count against the user —
+ * a decline shouldn't punish the sender's ability to gift someone else).
  *
  *   LOW: max 1 per chat per day,  max 2 per sender per week
  *   MID: max 1 per chat per week, max 2 per sender per month
@@ -86,7 +87,9 @@ const daysAgo = (n) => new Date(Date.now() - n * 24 * 60 * 60 * 1000);
  * Returns { low: { canSend, reason }, mid: { canSend, reason } }.
  */
 export const checkGiftRateLimits = async ({ senderId, chatId }) => {
-  const notCancelled = { status: { $ne: "CANCELLED" } };
+  const notCancelled = {
+    status: { $nin: ["CANCELLED", "REFUND_REQUIRED", "REFUNDED"] },
+  };
 
   const [
     lowChatToday,

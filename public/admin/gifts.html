@@ -1,0 +1,523 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Fuse Gifting — Admin</title>
+<style>
+  :root {
+    --brand: #ff5864;
+    --brand-soft: #fff0f1;
+    --bg: #faf8f3;
+    --surface: #ffffff;
+    --border: #e8e5e0;
+    --text: #1a1a1a;
+    --text2: #666;
+    --text3: #aaa;
+    --green: #059669;
+    --amber: #d97706;
+    --red: #dc2626;
+    --radius: 12px;
+    --shadow: 0 2px 8px rgba(0,0,0,0.08);
+  }
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: var(--bg); color: var(--text); font-size: 14px; }
+  h1 { font-size: 20px; font-weight: 700; }
+  h2 { font-size: 16px; font-weight: 600; margin-bottom: 12px; }
+  h3 { font-size: 14px; font-weight: 600; }
+  a { color: var(--brand); cursor: pointer; }
+
+  /* ─── Layout ─────────────────────────────────────────────────── */
+  #app { display: flex; flex-direction: column; min-height: 100vh; }
+  #topbar {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 14px 24px; background: var(--surface); border-bottom: 1px solid var(--border);
+    position: sticky; top: 0; z-index: 100;
+    box-shadow: var(--shadow);
+  }
+  #topbar .logo { display: flex; align-items: center; gap: 10px; }
+  #topbar .logo-badge { background: var(--brand); color: #fff; padding: 3px 10px; border-radius: 6px; font-weight: 700; font-size: 12px; }
+  #topbar .meta { font-size: 12px; color: var(--text3); }
+  #main { display: flex; flex: 1; }
+  #sidebar {
+    width: 200px; flex-shrink: 0; background: var(--surface);
+    border-right: 1px solid var(--border); padding: 20px 0;
+    position: sticky; top: 57px; height: calc(100vh - 57px); overflow-y: auto;
+  }
+  #sidebar .nav-item {
+    display: flex; align-items: center; justify-content: space-between; gap: 8px;
+    padding: 10px 20px; cursor: pointer;
+    font-weight: 500; color: var(--text2); border-left: 3px solid transparent;
+    transition: all 0.15s;
+  }
+  #sidebar .nav-item:hover { background: var(--brand-soft); color: var(--brand); }
+  #sidebar .nav-item.active { color: var(--brand); border-left-color: var(--brand); background: var(--brand-soft); }
+  #sidebar .nav-count { font-size: 11px; font-weight: 700; background: var(--border); color: var(--text2); border-radius: 10px; padding: 1px 7px; }
+  #sidebar .nav-item.active .nav-count { background: var(--brand); color: #fff; }
+  #sidebar .nav-section { font-size: 11px; font-weight: 700; text-transform: uppercase; color: var(--text3); padding: 16px 20px 6px; letter-spacing: 0.8px; }
+  #content { flex: 1; padding: 28px; max-width: 900px; }
+
+  /* ─── Auth ───────────────────────────────────────────────────── */
+  #login-screen {
+    display: flex; align-items: center; justify-content: center;
+    min-height: 100vh; background: var(--bg);
+  }
+  .login-card {
+    background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
+    padding: 36px 32px; width: 360px; box-shadow: var(--shadow);
+  }
+  .login-card h1 { margin-bottom: 6px; }
+  .login-card .sub { color: var(--text3); font-size: 13px; margin-bottom: 28px; }
+  .login-card .logo-top { display: flex; align-items: center; gap: 8px; margin-bottom: 20px; }
+  .login-card .logo-mark { background: var(--brand); color: #fff; padding: 4px 10px; border-radius: 8px; font-weight: 700; font-size: 14px; }
+
+  /* ─── Forms ──────────────────────────────────────────────────── */
+  .form-group { margin-bottom: 16px; }
+  label { display: block; font-weight: 500; margin-bottom: 6px; font-size: 13px; }
+  input[type=text], input[type=tel], input[type=number], textarea, select {
+    width: 100%; padding: 10px 12px; border: 1px solid var(--border); border-radius: 8px;
+    font-family: inherit; font-size: 14px; background: var(--bg); color: var(--text);
+    outline: none; transition: border-color 0.15s;
+  }
+  input:focus, textarea:focus, select:focus { border-color: var(--brand); }
+  textarea { resize: vertical; min-height: 60px; }
+  .hint { font-size: 12px; color: var(--text3); margin-top: 4px; }
+
+  /* ─── Buttons ────────────────────────────────────────────────── */
+  .btn {
+    display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+    padding: 10px 18px; border-radius: 8px; font-family: inherit; font-size: 14px;
+    font-weight: 600; cursor: pointer; border: none; transition: opacity 0.15s;
+  }
+  .btn:hover { opacity: 0.85; }
+  .btn:disabled { opacity: 0.45; cursor: not-allowed; }
+  .btn-primary { background: var(--brand); color: #fff; }
+  .btn-secondary { background: var(--surface); color: var(--text); border: 1px solid var(--border); }
+  .btn-sm { padding: 6px 12px; font-size: 12px; }
+  .btn-danger { background: var(--red); color: #fff; }
+  .btn-success { background: var(--green); color: #fff; }
+  .btn-amber { background: var(--amber); color: #fff; }
+  .btn-full { width: 100%; margin-top: 4px; }
+
+  /* ─── Cards / tables ─────────────────────────────────────────── */
+  .card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 20px; margin-bottom: 14px; }
+  .card-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; margin-bottom: 10px; }
+  .card-title { font-weight: 600; font-size: 15px; }
+  .card-sub { font-size: 12px; color: var(--text3); margin-top: 2px; }
+  .card-meta { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0; }
+  .meta-chip { background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 2px 8px; font-size: 12px; color: var(--text2); }
+  .card-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border); }
+  .notes-area { margin-top: 10px; }
+
+  /* ─── Status badge ───────────────────────────────────────────── */
+  .badge { padding: 3px 8px; border-radius: 6px; font-size: 11px; font-weight: 600; border: 1px solid; display: inline-block; white-space: nowrap; }
+  .badge-green { color: var(--green); border-color: var(--green); }
+  .badge-amber { color: var(--amber); border-color: var(--amber); }
+  .badge-red { color: var(--red); border-color: var(--red); }
+  .badge-gray { color: var(--text3); border-color: var(--border); }
+
+  /* ─── Warning banner ─────────────────────────────────────────── */
+  .warn-banner {
+    background: #fff7ed; border: 1px solid #fde3b8; color: var(--amber);
+    border-radius: 8px; padding: 8px 12px; font-size: 12px; font-weight: 600;
+    margin-bottom: 10px;
+  }
+
+  /* ─── Address block ──────────────────────────────────────────── */
+  .address-block {
+    background: var(--bg); border: 1px solid var(--border); border-radius: 8px;
+    padding: 10px 12px; font-size: 13px; line-height: 1.6; margin: 8px 0;
+  }
+  .address-block .addr-label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.6px; color: var(--text3); font-weight: 700; margin-bottom: 4px; }
+
+  /* ─── Filter bar ─────────────────────────────────────────────── */
+  .filter-bar { display: flex; align-items: center; gap: 10px; margin-bottom: 20px; flex-wrap: wrap; }
+  .filter-bar .count { font-size: 13px; color: var(--text3); }
+
+  /* ─── Message ────────────────────────────────────────────────── */
+  #toast {
+    position: fixed; bottom: 24px; right: 24px; background: var(--text); color: #fff;
+    padding: 12px 20px; border-radius: 10px; font-size: 14px; font-weight: 500;
+    opacity: 0; transition: opacity 0.3s; pointer-events: none; z-index: 9999;
+    max-width: 320px;
+  }
+  #toast.show { opacity: 1; }
+  #toast.error { background: var(--red); }
+
+  /* ─── Util ───────────────────────────────────────────────────── */
+  .empty { text-align: center; padding: 48px 0; color: var(--text3); }
+  .loading { text-align: center; padding: 48px 0; color: var(--text3); }
+  .history { margin-top: 10px; border-top: 1px solid var(--border); padding-top: 10px; font-size: 12px; color: var(--text2); }
+  .history-row { display: flex; justify-content: space-between; padding: 3px 0; }
+
+  @media (max-width: 700px) {
+    #sidebar { display: none; }
+    #content { padding: 16px; }
+  }
+</style>
+</head>
+<body>
+
+<!-- ─── Toast ─────────────────────────────────────────────────────────────── -->
+<div id="toast"></div>
+
+<!-- ─── App container ────────────────────────────────────────────────────── -->
+<div id="app" style="display:none">
+  <div id="topbar">
+    <div class="logo">
+      <span class="logo-badge">FUSE</span>
+      <span style="font-weight:600">Gifting Admin</span>
+    </div>
+    <div style="display:flex;gap:12px;align-items:center">
+      <span class="meta" id="admin-label"></span>
+      <button class="btn btn-secondary btn-sm" onclick="logout()">Sign out</button>
+    </div>
+  </div>
+  <div id="main">
+    <nav id="sidebar">
+      <div class="nav-section">Orders</div>
+      <span class="nav-item" data-tab="review" onclick="switchTab('review')">
+        <span>🔍 Needs review</span><span class="nav-count" id="count-review">–</span>
+      </span>
+      <span class="nav-item" data-tab="progress" onclick="switchTab('progress')">
+        <span>⚙️ In progress</span><span class="nav-count" id="count-progress">–</span>
+      </span>
+      <span class="nav-item" data-tab="refunds" onclick="switchTab('refunds')">
+        <span>💸 Refunds owed</span><span class="nav-count" id="count-refunds">–</span>
+      </span>
+      <span class="nav-item" data-tab="done" onclick="switchTab('done')">
+        <span>✅ Done</span><span class="nav-count" id="count-done">–</span>
+      </span>
+      <span class="nav-item" data-tab="all" onclick="switchTab('all')">
+        <span>📋 All orders</span><span class="nav-count" id="count-all">–</span>
+      </span>
+    </nav>
+    <div id="content">
+      <div id="tab-panel"></div>
+    </div>
+  </div>
+</div>
+
+<!-- ─── Login screen ─────────────────────────────────────────────────────── -->
+<div id="login-screen">
+  <div class="login-card">
+    <div class="logo-top">
+      <span class="logo-mark">FUSE</span>
+      <span style="font-weight:600;font-size:16px">Gifting Admin</span>
+    </div>
+    <h1>Sign in</h1>
+    <p class="sub">Admin access only · phone OTP required</p>
+    <div id="otp-step-1">
+      <div class="form-group">
+        <label>Phone number (with country code)</label>
+        <input type="tel" id="phone-input" placeholder="+91 98765 43210" />
+      </div>
+      <button class="btn btn-primary btn-full" id="send-otp-btn" onclick="sendOtp()">Send OTP</button>
+    </div>
+    <div id="otp-step-2" style="display:none">
+      <div class="form-group">
+        <label>OTP code</label>
+        <input type="text" id="otp-input" placeholder="123456" maxlength="6" />
+        <div class="hint">Sent to <span id="otp-phone-display"></span></div>
+      </div>
+      <button class="btn btn-primary btn-full" id="verify-otp-btn" onclick="verifyOtp()">Verify OTP</button>
+      <button class="btn btn-secondary btn-full" style="margin-top:8px" onclick="resetLogin()">Back</button>
+    </div>
+  </div>
+</div>
+
+<script>
+// ─── State ───────────────────────────────────────────────────────────────────
+let TOKEN = localStorage.getItem("fuse_admin_token") || null;
+let USER_INFO = null;
+let currentTab = "review";
+let ALL_ORDERS = []; // last fetched batch, filtered client-side per tab
+const API = window.location.origin;
+
+// Status groupings for the sidebar tabs.
+const TAB_STATUSES = {
+  review:   ["ADMIN_REVIEW"],
+  progress: ["APPROVED", "PROCESSING", "FULFILLED"],
+  refunds:  ["REFUND_REQUIRED"],
+  done:     ["DELIVERED", "CANCELLED", "REFUNDED"],
+  all:      null, // no filter
+};
+
+// Mirrors AdminGiftController.js exactly — only offer actions the backend will accept.
+const ALLOWED_TRANSITIONS = {
+  ADMIN_REVIEW: ["APPROVED", "CANCELLED", "REFUND_REQUIRED"],
+  APPROVED: ["PROCESSING", "CANCELLED", "REFUND_REQUIRED"],
+  PROCESSING: ["FULFILLED", "CANCELLED", "REFUND_REQUIRED"],
+  FULFILLED: ["DELIVERED", "REFUND_REQUIRED"],
+  REFUND_REQUIRED: ["REFUNDED", "CANCELLED"],
+  DELIVERED: [],
+  CANCELLED: [],
+  REFUNDED: [],
+};
+const STATUS_TO_ACTION = {
+  APPROVED: "APPROVE",
+  PROCESSING: "MARK_PROCESSING",
+  FULFILLED: "MARK_FULFILLED",
+  DELIVERED: "MARK_DELIVERED",
+  CANCELLED: "CANCEL",
+  REFUND_REQUIRED: "MARK_REFUND_REQUIRED",
+  REFUNDED: "MARK_REFUNDED",
+};
+const ACTION_LABEL = {
+  APPROVE: { label: "Approve", cls: "btn-success" },
+  MARK_PROCESSING: { label: "Start processing", cls: "btn-primary" },
+  MARK_FULFILLED: { label: "Mark fulfilled", cls: "btn-primary" },
+  MARK_DELIVERED: { label: "Mark delivered", cls: "btn-success" },
+  CANCEL: { label: "Cancel", cls: "btn-danger" },
+  MARK_REFUND_REQUIRED: { label: "Refund required", cls: "btn-amber" },
+  MARK_REFUNDED: { label: "Mark refunded", cls: "btn-secondary" },
+};
+
+// ─── Init ─────────────────────────────────────────────────────────────────────
+window.onload = async () => {
+  if (TOKEN) {
+    const ok = await checkToken();
+    if (ok) return showApp();
+    TOKEN = null;
+    localStorage.removeItem("fuse_admin_token");
+  }
+};
+
+async function checkToken() {
+  try {
+    const r = await apiFetch("/api/profile");
+    if (!r.ok) return false;
+    const d = await r.json();
+    USER_INFO = d.data;
+    document.getElementById("admin-label").textContent = USER_INFO?.name || USER_INFO?.phoneNumber || "";
+    return true;
+  } catch { return false; }
+}
+
+// ─── Auth ─────────────────────────────────────────────────────────────────────
+async function sendOtp() {
+  const phone = document.getElementById("phone-input").value.trim();
+  if (!phone) return toast("Enter your phone number", true);
+  setBtn("send-otp-btn", "Sending...", true);
+  try {
+    const r = await fetch(`${API}/api/auth/verifyPhoneNumber`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ phoneNumber: phone })
+    });
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.message || "Failed");
+    document.getElementById("otp-phone-display").textContent = phone;
+    document.getElementById("otp-step-1").style.display = "none";
+    document.getElementById("otp-step-2").style.display = "";
+  } catch (e) { toast(e.message, true); }
+  setBtn("send-otp-btn", "Send OTP", false);
+}
+
+async function verifyOtp() {
+  const phone = document.getElementById("phone-input").value.trim();
+  const code = document.getElementById("otp-input").value.trim();
+  if (!code) return toast("Enter the OTP", true);
+  setBtn("verify-otp-btn", "Verifying...", true);
+  try {
+    const r = await fetch(`${API}/api/auth/verifyCode`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ phoneNumber: phone, code })
+    });
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.message || "Invalid OTP");
+    TOKEN = d.data?.token;
+    if (!TOKEN) throw new Error("No token received");
+    localStorage.setItem("fuse_admin_token", TOKEN);
+    const ok = await checkToken();
+    if (!ok) { toast("Not an admin account", true); TOKEN = null; localStorage.removeItem("fuse_admin_token"); return; }
+    // Test admin access specifically against the gifts admin API.
+    const ar = await apiFetch("/api/admin/gifts/orders?limit=1");
+    if (ar.status === 403) { toast("This account doesn't have admin access", true); TOKEN = null; localStorage.removeItem("fuse_admin_token"); return; }
+    showApp();
+  } catch (e) { toast(e.message, true); }
+  setBtn("verify-otp-btn", "Verify OTP", false);
+}
+
+function resetLogin() {
+  document.getElementById("otp-step-1").style.display = "";
+  document.getElementById("otp-step-2").style.display = "none";
+  document.getElementById("otp-input").value = "";
+}
+
+function logout() {
+  TOKEN = null; localStorage.removeItem("fuse_admin_token");
+  location.reload();
+}
+
+// ─── Shell ────────────────────────────────────────────────────────────────────
+function showApp() {
+  document.getElementById("login-screen").style.display = "none";
+  document.getElementById("app").style.display = "flex";
+  switchTab("review");
+}
+
+function switchTab(tab) {
+  currentTab = tab;
+  document.querySelectorAll(".nav-item").forEach(n => n.classList.remove("active"));
+  document.querySelector(`.nav-item[data-tab="${tab}"]`).classList.add("active");
+  loadOrders();
+}
+
+// ─── API helpers ──────────────────────────────────────────────────────────────
+function apiFetch(path, opts = {}) {
+  return fetch(`${API}${path}`, {
+    ...opts,
+    headers: { "Content-Type": "application/json", "Authorization": `Bearer ${TOKEN}`, ...(opts.headers || {}) }
+  });
+}
+async function apiGet(path) {
+  const r = await apiFetch(path); const d = await r.json();
+  if (!r.ok) throw new Error(d.message || r.status); return d;
+}
+async function apiPatch(path, body) {
+  const r = await apiFetch(path, { method: "PATCH", body: JSON.stringify(body) }); const d = await r.json();
+  if (!r.ok) throw new Error(d.message || r.status); return d;
+}
+
+// ─── Utilities ────────────────────────────────────────────────────────────────
+function toast(msg, err = false) {
+  const t = document.getElementById("toast");
+  t.textContent = msg; t.className = "show" + (err ? " error" : "");
+  setTimeout(() => t.className = "", 3500);
+}
+function setBtn(id, label, disabled) {
+  const b = document.getElementById(id); if (!b) return;
+  b.textContent = label; b.disabled = disabled;
+}
+function fmtDate(s) {
+  if (!s) return "—";
+  return new Date(s).toLocaleString("en-IN", { day:"numeric", month:"short", year:"numeric", hour:"2-digit", minute:"2-digit" });
+}
+function statusBadge(s) {
+  const greenSet = ["DELIVERED", "FULFILLED"];
+  const amberSet = ["ADMIN_REVIEW", "PROCESSING", "REFUND_REQUIRED"];
+  const redSet   = ["CANCELLED"];
+  const cls = greenSet.includes(s) ? "badge-green" : amberSet.includes(s) ? "badge-amber" : redSet.includes(s) ? "badge-red" : "badge-gray";
+  return `<span class="badge ${cls}">${s.replace(/_/g, " ")}</span>`;
+}
+function el(id) { return document.getElementById(id); }
+function esc(s) { return String(s ?? "").replace(/[&<>"']/g, c => ({ "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#39;" }[c])); }
+
+// ─── ORDERS ───────────────────────────────────────────────────────────────────
+async function loadOrders() {
+  const panel = el("tab-panel");
+  panel.innerHTML = `
+    <h2 class="section-title">${tabTitle(currentTab)}</h2>
+    <div class="filter-bar">
+      <button class="btn btn-secondary btn-sm" onclick="loadOrders()">↻ Refresh</button>
+    </div>
+    <div id="orders-list"><div class="loading">Loading…</div></div>`;
+  try {
+    // Fetch a broad page once; tabs are filtered client-side by status group.
+    const data = await apiGet(`/api/admin/gifts/orders?limit=100`);
+    ALL_ORDERS = data.orders || [];
+    updateCounts();
+    const statuses = TAB_STATUSES[currentTab];
+    const list = statuses ? ALL_ORDERS.filter(o => statuses.includes(o.status)) : ALL_ORDERS;
+    const container = el("orders-list");
+    if (!list.length) { container.innerHTML = `<div class="empty">No orders here.</div>`; return; }
+    container.innerHTML = list.map(o => orderCard(o)).join("");
+  } catch (e) { el("orders-list").innerHTML = `<div class="empty" style="color:var(--red)">${esc(e.message)}</div>`; }
+}
+function tabTitle(tab) {
+  return { review: "Needs review", progress: "In progress", refunds: "Refunds owed", done: "Done", all: "All orders" }[tab] || "Orders";
+}
+function updateCounts() {
+  Object.keys(TAB_STATUSES).forEach(tab => {
+    const statuses = TAB_STATUSES[tab];
+    const n = statuses ? ALL_ORDERS.filter(o => statuses.includes(o.status)).length : ALL_ORDERS.length;
+    const badge = el(`count-${tab}`);
+    if (badge) badge.textContent = n;
+  });
+}
+
+function orderCard(o) {
+  const sender = o.sender || {};
+  const recipient = o.recipient || {};
+  const addr = o.deliverySnapshot || {};
+  const nextStatuses = ALLOWED_TRANSITIONS[o.status] || [];
+  const actionButtons = nextStatuses.map(s => {
+    const action = STATUS_TO_ACTION[s];
+    const meta = ACTION_LABEL[action] || { label: action, cls: "btn-secondary" };
+    return `<button class="btn btn-sm ${meta.cls}" onclick="orderAction('${o.orderId}','${action}')">${meta.label}</button>`;
+  }).join("");
+
+  const historyRows = (o.statusHistory || []).slice().reverse().map(h =>
+    `<div class="history-row"><span>${esc(h.status)}${h.byRole ? ` · ${esc(h.byRole)}` : ""}</span><span>${fmtDate(h.at)}</span></div>`
+  ).join("");
+
+  return `<div class="card" id="order-${o.orderId}">
+    <div class="card-header">
+      <div>
+        <div class="card-title">${esc(o.orderCode || o.orderId)} · ${esc(o.tier || "—")}</div>
+        <div class="card-sub">${esc(sender.name || sender.username || "Sender")} → ${esc(recipient.name || recipient.username || "Recipient")} · ${fmtDate(o.createdAt)}</div>
+      </div>
+      ${statusBadge(o.status)}
+    </div>
+
+    ${o.addressMissing ? `<div class="warn-banner">⚠️ Recipient address missing — cannot fulfil until resolved.</div>` : ""}
+
+    <div class="card-meta">
+      <span class="meta-chip">Total: ₹${o.totalAmount}</span>
+      ${o.items && o.items[0] ? `<span class="meta-chip">${esc(o.items[0].name)}${o.items.length > 1 ? ` +${o.items.length - 1} more` : ""}</span>` : ""}
+      ${o.trackingUrl ? `<span class="meta-chip">Tracking set</span>` : ""}
+    </div>
+
+    <div class="address-block">
+      <div class="addr-label">Delivery address (admin only)</div>
+      ${addr.name ? esc(addr.name) + "<br/>" : ""}
+      ${addr.phone ? esc(addr.phone) + "<br/>" : ""}
+      ${[addr.line1, addr.line2].filter(Boolean).map(esc).join(", ")}<br/>
+      ${addr.landmark ? `Near ${esc(addr.landmark)}<br/>` : ""}
+      ${[addr.city, addr.state, addr.pincode].filter(Boolean).map(esc).join(", ")}
+      ${!addr.line1 && !addr.line2 && !addr.city ? `<em style="color:var(--text3)">No address on file</em>` : ""}
+    </div>
+
+    <div class="form-group" style="margin-top:8px">
+      <label>Tracking URL</label>
+      <input type="text" id="track-${o.orderId}" value="${esc(o.trackingUrl || "")}" placeholder="https://…" />
+    </div>
+    <div class="form-group">
+      <label>Vendor order ID</label>
+      <input type="text" id="vendor-${o.orderId}" value="${esc(o.vendorOrderId || "")}" placeholder="e.g. Blinkit order id" />
+    </div>
+    <div class="notes-area">
+      <label>Admin notes</label>
+      <textarea id="notes-${o.orderId}" placeholder="Internal notes…" rows="2">${esc(o.adminNotes || "")}</textarea>
+    </div>
+
+    <div class="card-actions">
+      <button class="btn btn-sm btn-secondary" onclick="saveOrderNotes('${o.orderId}')">Save notes</button>
+      ${actionButtons}
+    </div>
+
+    ${historyRows ? `<div class="history">${historyRows}</div>` : ""}
+  </div>`;
+}
+
+async function orderAction(id, action) {
+  const trackingUrl = el(`track-${id}`)?.value || undefined;
+  const vendorOrderId = el(`vendor-${id}`)?.value || undefined;
+  const note = el(`notes-${id}`)?.value || undefined;
+  try {
+    await apiPatch(`/api/admin/gifts/orders/${id}/status`, { action, trackingUrl, vendorOrderId, note });
+    toast("Order updated ✓");
+    loadOrders();
+  } catch (e) { toast(e.message, true); }
+}
+
+async function saveOrderNotes(id) {
+  const notes = el(`notes-${id}`)?.value || "";
+  try {
+    await apiPatch(`/api/admin/gifts/orders/${id}/notes`, { notes });
+    toast("Notes saved ✓");
+  } catch (e) { toast(e.message, true); }
+}
+</script>
+</body>
+</html>

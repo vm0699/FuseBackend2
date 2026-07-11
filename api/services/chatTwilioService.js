@@ -68,6 +68,11 @@ export const ensureChatTwilioChannel = async ({
     const createdChannel = await service.channels.create({
       friendlyName: getChannelFriendlyName(userAId, userBId),
       uniqueName: `chat-${pairKey}`,
+      // 🔒 Chat tokens carry a service-wide grant (Twilio's ChatGrant can't be
+      // scoped to one channel), so channel-level access must be private —
+      // otherwise any user with a valid token could join by SID without
+      // being an added member.
+      type: "private",
     });
 
     channelSid = createdChannel.sid;

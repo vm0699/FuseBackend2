@@ -121,6 +121,14 @@ const profileSchema = new Schema(
       allowDateInvites: { type: Boolean, default: true },
     },
 
+    // ===== EXPLORE EVENT STATS (Iteration 2 — Event Circles) =====
+    eventStats: {
+      checkInCount: { type: Number, default: 0 },
+      currentStreak: { type: Number, default: 0 },
+      lastCheckInAt: { type: Date, default: null },
+      badges: { type: [String], default: [] },
+    },
+
     // ===== DISCOVERY PREFERENCES =====
     preferredGender: { type: [String], default: [] },
 
@@ -143,6 +151,7 @@ const profileSchema = new Schema(
       drinking: { type: [String], default: [] },
       smoking: { type: [String], default: [] },
       activeOnly: { type: Boolean, default: false },
+      eventScope: { type: String, enum: ["EVERYONE", "EVENT_GOERS", "MY_CIRCLES"], default: "EVERYONE" },
     },
 
     // ===== MATCHING & SWIPE TRACKING =====

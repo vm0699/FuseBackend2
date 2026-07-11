@@ -2,10 +2,8 @@ import jwt from "jsonwebtoken";
 import UserProfile from "../models/UserProfile.js";
 
 const authMiddleware = async (req, res, next) => {
-  console.log("🔑 [DEBUG] authMiddleware hit", req.headers);
   try {
     const token = req.headers.authorization?.split(" ")[1];
-    console.log("🔹 Received Authorization Header:", req.headers.authorization);
 
     if (!token) {
       console.log("❌ Auth Middleware: No token provided.");
@@ -21,15 +19,13 @@ const authMiddleware = async (req, res, next) => {
       return res.status(401).json({ success: false, message: "Unauthorized: Invalid or expired token" });
     }
 
-    console.log("🔹 Decoded JWT:", decoded);
-
     /**
      * 🔹 2.1 FIX:
      * username is OPTIONAL during onboarding
      * Only id + phoneNumber are mandatory
      */
     if (!decoded.id || typeof decoded.id !== "string" || !decoded.phoneNumber) {
-      console.warn("⚠️ Token missing required fields. Decoded:", decoded);
+      console.warn("⚠️ Token missing required fields (id/phoneNumber).");
       return res.status(400).json({
         success: false,
         message: "Invalid token data",
