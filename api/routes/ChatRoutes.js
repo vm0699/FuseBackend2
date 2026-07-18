@@ -20,6 +20,7 @@ import {
   getSentGifts,
   getReceivedGifts,
   getGiftOrderDetails,
+  getChatGiftOrders,
 } from "../controllers/GiftTrackingController.js";
 import { blockChatUser, reportChatUser } from "../controllers/ChatSafetyController.js";
 import { createRateLimiter } from "../middleware/rateLimit.js";
@@ -72,6 +73,7 @@ router.get("/:chatId/messages", authMiddleware, getChatMessages);
 router.post("/:chatId/messages", authMiddleware, messageRateLimit, saveChatMessage);
 
 router.get("/:chatId/gift/eligibility", authMiddleware, getGiftEligibility);
+router.get("/:chatId/gifts", authMiddleware, getChatGiftOrders);
 router.post("/:chatId/gift-intent", authMiddleware, createGiftIntent);
 router.get("/gift-intent/:intentId", authMiddleware, getGiftIntentDetails);
 router.post("/gift-intent/:intentId/pay", authMiddleware, initiateGiftPayment);

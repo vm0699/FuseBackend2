@@ -1,12 +1,55 @@
 import GiftOrder from "../models/GiftOrder.js";
 import GiftPayment from "../models/GiftPaymentModel.js";
+import Chat from "../models/ChatModel.js";
 import notificationService from "../services/notificationService.js";
 import { NOTIFICATION_TYPES } from "../services/notifications/notificationTypes.js";
 import { serializeOrderForViewer } from "../services/giftOrderService.js";
 import { alertGiftRefundRequired } from "../services/opsAlertService.js";
+import { getChatParticipantIds } from "../services/giftEligibilityService.js";
 
 // Recipient may decline only before fulfilment.
 const DECLINABLE_STATUSES = ["PAID", "ADMIN_REVIEW", "APPROVED", "PROCESSING"];
+
+// GET /api/chat/:chatId/gifts — all gift orders exchanged in one specific
+// chat (both directions), so a chat's gift history is visible without
+// hunting through the unfiltered "My Gifts" list. Same privacy rules as
+// every other order-list endpoint (serializeOrderForViewer strips the
+// address for the sender's perspective).
+export const getChatGiftOrders = async (req, res) => {
+  try {
+    const { chatId } = req.params;
+    const userId = req.user.id;
+
+    // Verify chat participancy the same way eligibility does, rather than
+    // re-deriving it from GiftOrder.senderId/recipientId — a chat's identity
+    // is the source of truth for "who's allowed to see this," and every
+    // order tied to this chatId already belongs to exactly these two people.
+    const chat = await Chat.findById(chatId);
+    if (!chat) {
+      return res.status(404).json({ success: false, message: "Chat not found" });
+    }
+    if (!getChatParticipantIds(chat).includes(userId.toString())) {
+      return res
+        .status(403)
+        .json({ success: false, message: "Not authorized to view this chat's gifts" });
+    }
+
+    const orders = await GiftOrder.find({ chatId })
+      .sort({ createdAt: -1 })
+      .populate("senderId", "name username photos")
+      .populate("recipientId", "name username photos");
+
+    return res.status(200).json({
+      success: true,
+      orders: orders.map((o) => serializeOrderForViewer(o, userId)),
+    });
+  } catch (err) {
+    console.error("🔥 [GIFT] getChatGiftOrders error:", err);
+    return res
+      .status(500)
+      .json({ success: false, message: "Failed to fetch chat gift orders" });
+  }
+};
 
 // GET /api/chat/gifts/order/:orderId
 export const getGiftOrderDetails = async (req, res) => {
