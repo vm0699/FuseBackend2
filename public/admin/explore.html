@@ -191,21 +191,21 @@
       <span style="font-weight:600;font-size:16px">Explore Admin</span>
     </div>
     <h1>Sign in</h1>
-    <p class="sub">Admin access only · phone OTP required</p>
+    <p class="sub">Admin access only · email OTP required</p>
     <div id="otp-step-1">
       <div class="form-group">
-        <label>Phone number (with country code)</label>
-        <input type="tel" id="phone-input" placeholder="+91 98765 43210" />
+        <label>Admin email</label>
+        <input type="text" id="email-input" placeholder="admin@example.com" />
       </div>
-      <button class="btn btn-primary btn-full" id="send-otp-btn" onclick="sendOtp()">Send OTP</button>
+      <button class="btn btn-primary btn-full" id="send-otp-btn" onclick="sendOtp()">Send code</button>
     </div>
     <div id="otp-step-2" style="display:none">
       <div class="form-group">
         <label>OTP code</label>
         <input type="text" id="otp-input" placeholder="123456" maxlength="6" />
-        <div class="hint">Sent to <span id="otp-phone-display"></span></div>
+        <div class="hint">Sent to <span id="otp-email-display"></span></div>
       </div>
-      <button class="btn btn-primary btn-full" id="verify-otp-btn" onclick="verifyOtp()">Verify OTP</button>
+      <button class="btn btn-primary btn-full" id="verify-otp-btn" onclick="verifyOtp()">Verify code</button>
       <button class="btn btn-secondary btn-full" style="margin-top:8px" onclick="resetLogin()">Back</button>
     </div>
   </div>
@@ -241,36 +241,36 @@ async function checkToken() {
 
 // ─── Auth ─────────────────────────────────────────────────────────────────────
 async function sendOtp() {
-  const phone = document.getElementById("phone-input").value.trim();
-  if (!phone) return toast("Enter your phone number", true);
+  const email = document.getElementById("email-input").value.trim();
+  if (!email) return toast("Enter your admin email", true);
   setBtn("send-otp-btn", "Sending...", true);
   try {
-    const r = await fetch(`${API}/api/auth/verifyPhoneNumber`, {
+    const r = await fetch(`${API}/api/auth/sendEmailOTP`, {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ phoneNumber: phone })
+      body: JSON.stringify({ email })
     });
     const d = await r.json();
     if (!r.ok) throw new Error(d.message || "Failed");
-    document.getElementById("otp-phone-display").textContent = phone;
+    document.getElementById("otp-email-display").textContent = email;
     document.getElementById("otp-step-1").style.display = "none";
     document.getElementById("otp-step-2").style.display = "";
   } catch (e) { toast(e.message, true); }
-  setBtn("send-otp-btn", "Send OTP", false);
+  setBtn("send-otp-btn", "Send code", false);
 }
 
 async function verifyOtp() {
-  const phone = document.getElementById("phone-input").value.trim();
+  const email = document.getElementById("email-input").value.trim();
   const code = document.getElementById("otp-input").value.trim();
-  if (!code) return toast("Enter the OTP", true);
+  if (!code) return toast("Enter the code", true);
   setBtn("verify-otp-btn", "Verifying...", true);
   try {
-    const r = await fetch(`${API}/api/auth/verifyCode`, {
+    const r = await fetch(`${API}/api/auth/verifyEmailOTP`, {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ phoneNumber: phone, code })
+      body: JSON.stringify({ email, code })
     });
     const d = await r.json();
-    if (!r.ok) throw new Error(d.message || "Invalid OTP");
-    TOKEN = d.data?.token;
+    if (!r.ok) throw new Error(d.message || "Invalid code");
+    TOKEN = d.data?.accessToken;
     if (!TOKEN) throw new Error("No token received");
     localStorage.setItem("fuse_admin_token", TOKEN);
     const ok = await checkToken();
@@ -280,7 +280,7 @@ async function verifyOtp() {
     if (ar.status === 403) { toast("This account doesn't have admin access", true); TOKEN = null; localStorage.removeItem("fuse_admin_token"); return; }
     showApp();
   } catch (e) { toast(e.message, true); }
-  setBtn("verify-otp-btn", "Verify OTP", false);
+  setBtn("verify-otp-btn", "Verify code", false);
 }
 
 function resetLogin() {

@@ -62,6 +62,15 @@ const reportRateLimit = createRateLimiter({
   message: "Too many reports submitted. Please try again later.",
 });
 
+// Now also serves UPI UTR submission (free-text user input), not just
+// Razorpay/placeholder confirms — was previously unthrottled.
+const giftPayConfirmRateLimit = createRateLimiter({
+  keyPrefix: "gift-pay-confirm",
+  windowMs: 60 * 60 * 1000,
+  max: 20,
+  message: "Too many payment confirmations. Please try again later.",
+});
+
 router.post("/send-compliment", authMiddleware, sendComplimentRateLimit, sendCompliment);
 router.post("/handle-chat-request", authMiddleware, handleRequestRateLimit, handleChatRequest);
 router.get("/list", authMiddleware, getUserChats);
@@ -77,7 +86,12 @@ router.get("/:chatId/gifts", authMiddleware, getChatGiftOrders);
 router.post("/:chatId/gift-intent", authMiddleware, createGiftIntent);
 router.get("/gift-intent/:intentId", authMiddleware, getGiftIntentDetails);
 router.post("/gift-intent/:intentId/pay", authMiddleware, initiateGiftPayment);
-router.post("/gift-intent/:intentId/pay/confirm", authMiddleware, confirmGiftPayment);
+router.post(
+  "/gift-intent/:intentId/pay/confirm",
+  authMiddleware,
+  giftPayConfirmRateLimit,
+  confirmGiftPayment
+);
 router.get("/gifts/sent", authMiddleware, getSentGifts);
 router.get("/gifts/received", authMiddleware, getReceivedGifts);
 router.get("/gifts/order/:orderId", authMiddleware, getGiftOrderDetails);

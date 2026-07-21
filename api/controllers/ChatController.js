@@ -4,6 +4,7 @@ import UserProfile from "../models/UserProfile.js";
 import GiftOrder from "../models/GiftOrder.js";
 import GiftIntent from "../models/GiftIntentModel.js";
 import GiftCatalogItem from "../models/GiftCatalogItem.js";
+import GiftPayment from "../models/GiftPaymentModel.js";
 import Block from "../models/Block.js";
 import client from "../config/twilio.js";
 import dotenv from "dotenv";
@@ -119,6 +120,14 @@ const mapGiftIntentForResponse = async (intent, currentUserId) => {
     .select("_id orderCode status")
     .lean();
 
+  // Latest payment attempt for this intent — lets the deep-link fallback
+  // screen render "submitted, awaiting verification" / "couldn't verify"
+  // states before (or in place of) an order existing.
+  const latestPayment = await GiftPayment.findOne({ giftIntentId: populatedIntent._id })
+    .sort({ createdAt: -1 })
+    .select("mode status")
+    .lean();
+
   return {
     intentId: populatedIntent._id,
     chatId: populatedIntent.chatId,
@@ -137,6 +146,13 @@ const mapGiftIntentForResponse = async (intent, currentUserId) => {
           orderId: linkedOrder._id,
           orderCode: linkedOrder.orderCode || null,
           status: linkedOrder.status,
+        }
+      : null,
+    latestPayment: latestPayment
+      ? {
+          paymentId: latestPayment._id,
+          mode: latestPayment.mode,
+          status: latestPayment.status,
         }
       : null,
     counterpart: {

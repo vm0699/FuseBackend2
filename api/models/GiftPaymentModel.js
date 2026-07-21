@@ -39,10 +39,10 @@ const GiftPaymentSchema = new mongoose.Schema(
       default: "INR",
     },
 
-    // PLACEHOLDER (dev) or RAZORPAY (real). Set from GIFT_PAYMENT_MODE.
+    // PLACEHOLDER (dev), RAZORPAY (gateway), or UPI (direct deep-link, manual admin verify). Set from GIFT_PAYMENT_MODE.
     mode: {
       type: String,
-      enum: ["PLACEHOLDER", "RAZORPAY"],
+      enum: ["PLACEHOLDER", "RAZORPAY", "UPI"],
       default: "PLACEHOLDER",
     },
 
@@ -66,9 +66,10 @@ const GiftPaymentSchema = new mongoose.Schema(
       sparse: true,
     },
 
+    // PENDING_VERIFICATION = UPI-only: user submitted a UTR, awaiting admin review.
     status: {
       type: String,
-      enum: ["INITIATED", "PAID", "FAILED", "REFUNDED"],
+      enum: ["INITIATED", "PENDING_VERIFICATION", "PAID", "FAILED", "REFUNDED"],
       default: "INITIATED",
     },
 
@@ -76,6 +77,22 @@ const GiftPaymentSchema = new mongoose.Schema(
 
     failureReason: {
       type: String,
+    },
+
+    // UPI-specific fields. Populated when mode === "UPI".
+    upi: {
+      payeeVpa: String,
+      payeeName: String,
+      deepLink: String,
+      submittedUtr: String,
+      submittedAt: Date,
+      userNote: String,
+      verifiedByAdminId: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: "UserProfile",
+      },
+      verifiedAt: Date,
+      rejectionReason: String,
     },
 
     meta: {
@@ -86,5 +103,6 @@ const GiftPaymentSchema = new mongoose.Schema(
 );
 
 GiftPaymentSchema.index({ giftIntentId: 1, status: 1 });
+GiftPaymentSchema.index({ mode: 1, status: 1 });
 
 export default mongoose.model("GiftPayment", GiftPaymentSchema);

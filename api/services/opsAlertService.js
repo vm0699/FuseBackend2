@@ -52,6 +52,38 @@ export const alertNewGiftOrder = async (order) => {
 };
 
 /**
+ * A UPI gift payment had a UTR submitted by the sender and needs manual
+ * admin review (cross-check UTR + amount against the bank statement) before
+ * an order is created — there is no order yet at this point, so this alert
+ * carries the payment/intent directly rather than an order.
+ */
+export const alertUpiPaymentPendingVerification = async (payment, intent, { duplicateSuspected } = {}) => {
+  const summary = {
+    type: "UPI Gift Payment — Pending Verification",
+    paymentId: payment?._id?.toString?.() || "—",
+    amount: `₹${(payment?.amount || 0).toLocaleString("en-IN")}`,
+    utr: payment?.upi?.submittedUtr || "—",
+    duplicate: duplicateSuspected ? "⚠️ Duplicate UTR" : "No",
+    at: new Date().toLocaleString("en-IN", { timeZone: "Asia/Kolkata" }),
+  };
+
+  const waMessage =
+    `💳 *UPI Payment Needs Verification* — ${summary.paymentId}\n` +
+    `Amount: ${summary.amount} | UTR: ${summary.utr}\n` +
+    (duplicateSuspected ? "⚠️ Duplicate UTR — check carefully\n" : "") +
+    `Time: ${summary.at}\n` +
+    `Admin: ${ADMIN_URL}/gifts.html`;
+
+  const emailHtml = buildEmailHtml("UPI Payment Needs Verification", summary, payment?._id);
+
+  await Promise.allSettled([
+    sendWhatsAppAlert(waMessage),
+    sendEmailAlert(`[Fuse] UPI payment awaiting verification — ${summary.amount}`, emailHtml),
+    notifyAdminPush("GIFT_ADMIN_NEW_ORDER", summary, payment),
+  ]);
+};
+
+/**
  * Recipient declined a paid gift -> refund owed. Ops must see this or the
  * refund sits invisible (no gateway auto-refund exists yet — manual SOP).
  */
@@ -239,6 +271,7 @@ const buildEmailHtml = (heading, summary, entityId) => `
 
 export default {
   alertNewGiftOrder,
+  alertUpiPaymentPendingVerification,
   alertGiftRefundRequired,
   alertNewBooking,
   alertNewTicketOrder,

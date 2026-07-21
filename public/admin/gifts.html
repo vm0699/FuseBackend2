@@ -191,6 +191,10 @@
       <span class="nav-item" data-tab="all" onclick="switchTab('all')">
         <span>📋 All orders</span><span class="nav-count" id="count-all">–</span>
       </span>
+      <div class="nav-section">Payments</div>
+      <span class="nav-item" data-tab="upi-verify" onclick="switchTab('upi-verify')">
+        <span>💳 UPI verification</span><span class="nav-count" id="count-upi-verify">–</span>
+      </span>
     </nav>
     <div id="content">
       <div id="tab-panel"></div>
@@ -206,21 +210,21 @@
       <span style="font-weight:600;font-size:16px">Gifting Admin</span>
     </div>
     <h1>Sign in</h1>
-    <p class="sub">Admin access only · phone OTP required</p>
+    <p class="sub">Admin access only · email OTP required</p>
     <div id="otp-step-1">
       <div class="form-group">
-        <label>Phone number (with country code)</label>
-        <input type="tel" id="phone-input" placeholder="+91 98765 43210" />
+        <label>Admin email</label>
+        <input type="text" id="email-input" placeholder="admin@example.com" />
       </div>
-      <button class="btn btn-primary btn-full" id="send-otp-btn" onclick="sendOtp()">Send OTP</button>
+      <button class="btn btn-primary btn-full" id="send-otp-btn" onclick="sendOtp()">Send code</button>
     </div>
     <div id="otp-step-2" style="display:none">
       <div class="form-group">
         <label>OTP code</label>
         <input type="text" id="otp-input" placeholder="123456" maxlength="6" />
-        <div class="hint">Sent to <span id="otp-phone-display"></span></div>
+        <div class="hint">Sent to <span id="otp-email-display"></span></div>
       </div>
-      <button class="btn btn-primary btn-full" id="verify-otp-btn" onclick="verifyOtp()">Verify OTP</button>
+      <button class="btn btn-primary btn-full" id="verify-otp-btn" onclick="verifyOtp()">Verify code</button>
       <button class="btn btn-secondary btn-full" style="margin-top:8px" onclick="resetLogin()">Back</button>
     </div>
   </div>
@@ -296,36 +300,36 @@ async function checkToken() {
 
 // ─── Auth ─────────────────────────────────────────────────────────────────────
 async function sendOtp() {
-  const phone = document.getElementById("phone-input").value.trim();
-  if (!phone) return toast("Enter your phone number", true);
+  const email = document.getElementById("email-input").value.trim();
+  if (!email) return toast("Enter your admin email", true);
   setBtn("send-otp-btn", "Sending...", true);
   try {
-    const r = await fetch(`${API}/api/auth/verifyPhoneNumber`, {
+    const r = await fetch(`${API}/api/auth/sendEmailOTP`, {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ phoneNumber: phone })
+      body: JSON.stringify({ email })
     });
     const d = await r.json();
     if (!r.ok) throw new Error(d.message || "Failed");
-    document.getElementById("otp-phone-display").textContent = phone;
+    document.getElementById("otp-email-display").textContent = email;
     document.getElementById("otp-step-1").style.display = "none";
     document.getElementById("otp-step-2").style.display = "";
   } catch (e) { toast(e.message, true); }
-  setBtn("send-otp-btn", "Send OTP", false);
+  setBtn("send-otp-btn", "Send code", false);
 }
 
 async function verifyOtp() {
-  const phone = document.getElementById("phone-input").value.trim();
+  const email = document.getElementById("email-input").value.trim();
   const code = document.getElementById("otp-input").value.trim();
-  if (!code) return toast("Enter the OTP", true);
+  if (!code) return toast("Enter the code", true);
   setBtn("verify-otp-btn", "Verifying...", true);
   try {
-    const r = await fetch(`${API}/api/auth/verifyCode`, {
+    const r = await fetch(`${API}/api/auth/verifyEmailOTP`, {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ phoneNumber: phone, code })
+      body: JSON.stringify({ email, code })
     });
     const d = await r.json();
-    if (!r.ok) throw new Error(d.message || "Invalid OTP");
-    TOKEN = d.data?.token;
+    if (!r.ok) throw new Error(d.message || "Invalid code");
+    TOKEN = d.data?.accessToken;
     if (!TOKEN) throw new Error("No token received");
     localStorage.setItem("fuse_admin_token", TOKEN);
     const ok = await checkToken();
@@ -335,7 +339,7 @@ async function verifyOtp() {
     if (ar.status === 403) { toast("This account doesn't have admin access", true); TOKEN = null; localStorage.removeItem("fuse_admin_token"); return; }
     showApp();
   } catch (e) { toast(e.message, true); }
-  setBtn("verify-otp-btn", "Verify OTP", false);
+  setBtn("verify-otp-btn", "Verify code", false);
 }
 
 function resetLogin() {
@@ -360,7 +364,11 @@ function switchTab(tab) {
   currentTab = tab;
   document.querySelectorAll(".nav-item").forEach(n => n.classList.remove("active"));
   document.querySelector(`.nav-item[data-tab="${tab}"]`).classList.add("active");
-  loadOrders();
+  if (tab === "upi-verify") {
+    loadUpiPending();
+  } else {
+    loadOrders();
+  }
 }
 
 // ─── API helpers ──────────────────────────────────────────────────────────────
@@ -516,6 +524,75 @@ async function saveOrderNotes(id) {
   try {
     await apiPatch(`/api/admin/gifts/orders/${id}/notes`, { notes });
     toast("Notes saved ✓");
+  } catch (e) { toast(e.message, true); }
+}
+
+// ─── UPI PAYMENT VERIFICATION ──────────────────────────────────────────────────
+// Manual, human verification step: there is no bank API/webhook confirming
+// these credits, so an admin must cross-check the submitted UTR + amount
+// against the actual bank statement before confirming.
+async function loadUpiPending() {
+  const panel = el("tab-panel");
+  panel.innerHTML = `
+    <h2 class="section-title">UPI verification</h2>
+    <div class="filter-bar">
+      <button class="btn btn-secondary btn-sm" onclick="loadUpiPending()">↻ Refresh</button>
+    </div>
+    <div id="orders-list"><div class="loading">Loading…</div></div>`;
+  try {
+    const data = await apiGet(`/api/admin/gifts/upi-pending`);
+    const payments = data.payments || [];
+    const badge = el("count-upi-verify");
+    if (badge) badge.textContent = payments.length;
+    const container = el("orders-list");
+    if (!payments.length) { container.innerHTML = `<div class="empty">No UPI payments awaiting verification.</div>`; return; }
+    container.innerHTML = payments.map(p => upiCard(p)).join("");
+  } catch (e) { el("orders-list").innerHTML = `<div class="empty" style="color:var(--red)">${esc(e.message)}</div>`; }
+}
+
+function upiCard(p) {
+  return `<div class="card" id="upi-${p.paymentId}">
+    <div class="card-header">
+      <div>
+        <div class="card-title">₹${p.amount} · ${esc(p.senderName || "Sender")}</div>
+        <div class="card-sub">Submitted ${fmtDate(p.upi.submittedAt)}</div>
+      </div>
+      ${p.duplicateSuspected ? `<span class="badge badge-red">⚠️ Duplicate UTR</span>` : ""}
+    </div>
+
+    <div class="card-meta">
+      <span class="meta-chip" style="font-weight:700">Expected: ₹${p.amount}</span>
+      <span class="meta-chip">UTR: ${esc(p.upi.submittedUtr || "—")}</span>
+      ${p.upi.payeeVpa ? `<span class="meta-chip">To: ${esc(p.upi.payeeVpa)}</span>` : ""}
+    </div>
+
+    <div class="warn-banner">⚠️ Manually verify this UTR and amount against the bank statement before confirming. This action creates the order and cannot be automatically undone.</div>
+
+    ${p.upi.userNote ? `<div class="notes-area"><label>User note</label><div>${esc(p.upi.userNote)}</div></div>` : ""}
+
+    <div class="card-actions">
+      <button class="btn btn-sm btn-success" onclick="verifyUpiPayment('${p.paymentId}')">Confirm paid</button>
+      <button class="btn btn-sm btn-danger" onclick="rejectUpiPayment('${p.paymentId}')">Reject</button>
+    </div>
+  </div>`;
+}
+
+async function verifyUpiPayment(id) {
+  if (!confirm("Have you confirmed this UTR and amount against the bank statement?")) return;
+  try {
+    await apiPatch(`/api/admin/gifts/upi/${id}/verify`, {});
+    toast("Payment verified ✓");
+    loadUpiPending();
+  } catch (e) { toast(e.message, true); }
+}
+
+async function rejectUpiPayment(id) {
+  const reason = prompt("Reason for rejection:");
+  if (reason === null) return;
+  try {
+    await apiPatch(`/api/admin/gifts/upi/${id}/reject`, { reason });
+    toast("Payment rejected");
+    loadUpiPending();
   } catch (e) { toast(e.message, true); }
 }
 </script>

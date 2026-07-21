@@ -1,7 +1,10 @@
 import GiftOrder from "../models/GiftOrder.js";
+import GiftPayment from "../models/GiftPaymentModel.js";
+import GiftIntent from "../models/GiftIntentModel.js";
 import notificationService from "../services/notificationService.js";
 import { NOTIFICATION_TYPES } from "../services/notifications/notificationTypes.js";
 import { serializeOrderForAdmin } from "../services/giftOrderService.js";
+import { finalizeGiftPayment } from "../services/giftFinalizeService.js";
 
 // Admin action -> target status
 const ACTION_TO_STATUS = {
@@ -200,6 +203,185 @@ export const updateAdminGiftOrderStatus = async (req, res) => {
     return res
       .status(500)
       .json({ success: false, message: "Failed to update order status" });
+  }
+};
+
+// GET /api/admin/gifts/upi-pending — UPI payments awaiting manual verification.
+export const getPendingUpiPayments = async (req, res) => {
+  try {
+    const payments = await GiftPayment.find({
+      mode: "UPI",
+      status: "PENDING_VERIFICATION",
+    })
+      .sort({ "upi.submittedAt": 1 }) // oldest first — FIFO review queue
+      .populate("userId", "name username");
+
+    // Flag cross-payment duplicate UTRs inline so the admin sees the signal
+    // without a second request per card.
+    const utrs = payments.map((p) => p.upi?.submittedUtr).filter(Boolean);
+    const duplicateCounts = new Map();
+    if (utrs.length) {
+      const matches = await GiftPayment.find({
+        "upi.submittedUtr": { $in: utrs },
+      }).select("upi.submittedUtr");
+      matches.forEach((m) => {
+        const utr = m.upi?.submittedUtr;
+        if (!utr) return;
+        duplicateCounts.set(utr, (duplicateCounts.get(utr) || 0) + 1);
+      });
+    }
+
+    const results = payments.map((p) => ({
+      paymentId: p._id,
+      intentId: p.giftIntentId,
+      amount: p.amount,
+      currency: p.currency,
+      senderName: p.userId?.name || p.userId?.username || "Sender",
+      upi: {
+        submittedUtr: p.upi?.submittedUtr || null,
+        submittedAt: p.upi?.submittedAt || null,
+        userNote: p.upi?.userNote || null,
+        payeeVpa: p.upi?.payeeVpa || null,
+      },
+      duplicateSuspected: (duplicateCounts.get(p.upi?.submittedUtr) || 0) > 1,
+      createdAt: p.createdAt,
+    }));
+
+    return res.status(200).json({ success: true, payments: results });
+  } catch (err) {
+    console.error("🔥 [ADMIN] getPendingUpiPayments error:", err);
+    return res
+      .status(500)
+      .json({ success: false, message: "Failed to fetch pending UPI payments" });
+  }
+};
+
+// PATCH /api/admin/gifts/upi/:paymentId/verify
+export const verifyUpiPayment = async (req, res) => {
+  try {
+    const payment = await GiftPayment.findById(req.params.paymentId);
+    if (!payment || payment.mode !== "UPI") {
+      return res
+        .status(404)
+        .json({ success: false, message: "UPI payment not found" });
+    }
+
+    if (payment.status === "PAID") {
+      const existingOrder = await GiftOrder.findOne({ intentId: payment.giftIntentId });
+      return res.status(200).json({
+        success: true,
+        alreadyVerified: true,
+        orderId: existingOrder?._id || null,
+        status: existingOrder?.status || payment.status,
+      });
+    }
+
+    if (payment.status !== "PENDING_VERIFICATION") {
+      return res.status(400).json({
+        success: false,
+        message: `Cannot verify a payment in status ${payment.status}`,
+      });
+    }
+
+    const intent = await GiftIntent.findById(payment.giftIntentId);
+    if (!intent) {
+      return res
+        .status(404)
+        .json({ success: false, message: "Gift intent not found" });
+    }
+
+    payment.upi = {
+      ...(payment.upi || {}),
+      verifiedByAdminId: req.user.id,
+      verifiedAt: new Date(),
+    };
+    await payment.save();
+
+    const order = await finalizeGiftPayment({
+      payment,
+      intent,
+      providerPaymentId: payment.upi.submittedUtr,
+    });
+
+    console.log("📦 [ADMIN] UPI payment verified", {
+      paymentId: payment._id.toString(),
+      orderId: order._id.toString(),
+      by: req.user.id,
+    });
+
+    return res.status(200).json({
+      success: true,
+      orderId: order._id,
+      status: order.status,
+    });
+  } catch (err) {
+    console.error("🔥 [ADMIN] verifyUpiPayment error:", err);
+    return res
+      .status(500)
+      .json({ success: false, message: "Failed to verify UPI payment" });
+  }
+};
+
+// PATCH /api/admin/gifts/upi/:paymentId/reject  { reason }
+export const rejectUpiPayment = async (req, res) => {
+  try {
+    const { reason } = req.body || {};
+    const payment = await GiftPayment.findById(req.params.paymentId);
+    if (!payment || payment.mode !== "UPI") {
+      return res
+        .status(404)
+        .json({ success: false, message: "UPI payment not found" });
+    }
+
+    if (payment.status !== "PENDING_VERIFICATION") {
+      return res.status(400).json({
+        success: false,
+        message: `Cannot reject a payment in status ${payment.status}`,
+      });
+    }
+
+    payment.status = "FAILED";
+    payment.failureReason = reason || "admin_rejected";
+    payment.upi = {
+      ...(payment.upi || {}),
+      verifiedByAdminId: req.user.id,
+      verifiedAt: new Date(),
+      rejectionReason: reason || "",
+    };
+    await payment.save();
+
+    console.log("📦 [ADMIN] UPI payment rejected", {
+      paymentId: payment._id.toString(),
+      by: req.user.id,
+      reason: payment.failureReason,
+    });
+
+    // Notify sender to retry — fire-and-forget, admin action must not fail
+    // due to a push error.
+    notificationService
+      .sendToUser(
+        payment.userId,
+        notificationService.buildNotificationPayload({
+          type: NOTIFICATION_TYPES.GIFT_PAYMENT_FAILED,
+          data: {
+            intentId: payment.giftIntentId.toString(),
+            paymentId: payment._id.toString(),
+            screen: "GiftIntentDetailsScreen",
+          },
+        })
+      )
+      .catch((e) => console.error("[GIFT] UPI reject notify failed", e));
+
+    return res.status(200).json({
+      success: true,
+      paymentId: payment._id,
+      status: payment.status,
+    });
+  } catch (err) {
+    console.error("🔥 [ADMIN] rejectUpiPayment error:", err);
+    return res
+      .status(500)
+      .json({ success: false, message: "Failed to reject UPI payment" });
   }
 };
 

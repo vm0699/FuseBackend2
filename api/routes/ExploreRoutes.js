@@ -41,44 +41,50 @@ import {
   getCircle,
   wave,
 } from "../controllers/EventCircleController.js";
+import exploreCommerceGuard from "../middleware/exploreCommerceGuard.js";
 
 const router = express.Router();
 
-// ─── Explore home & catalog ───────────────────────────────────────────────────
+// ─── Explore home & catalog (READ — always open, powers browsing) ──────────────
 router.get("/home", getExploreHome);
 router.get("/venues", getVenues);
 router.get("/venues/:venueId", getVenueDetail);
 router.get("/events", getEvents);
 router.get("/events/:eventId", getEventDetail);
 
-// ─── Event circle (Iteration 2: RSVP lifecycle) ────────────────────────────────
-router.post("/events/:eventId/rsvp", createRsvp);
-router.post("/events/:eventId/rsvp/cancel", cancelRsvp);
-router.patch("/events/:eventId/rsvp", updateRsvpVisibility);
+// ─── Read-only user history (open — lists are empty until commerce is live) ─────
 router.get("/events/:eventId/circle", getCircle);
-router.post("/events/:eventId/wave", wave);
-router.post("/events/:eventId/checkin", checkin);
 router.get("/my-events", getMyEvents);
-
-// ─── Date bookings ────────────────────────────────────────────────────────────
-router.post("/bookings", createBooking);
 router.get("/bookings", getMyBookings);
 router.get("/bookings/:bookingId", getBookingDetail);
-router.post("/bookings/:bookingId/pay", initiateBookingPayment);
-router.post("/bookings/:bookingId/pay/confirm", confirmBookingPayment);
-router.post("/bookings/:bookingId/invite-response", respondToInvite);
-router.post("/bookings/:bookingId/cancel", cancelBooking);
-
-// ─── Event tickets ────────────────────────────────────────────────────────────
-router.post("/tickets", initiateTicketPurchase);
-router.post("/tickets/:orderId/pay/confirm", confirmTicketPayment);
 router.get("/tickets", getMyTicketOrders);
 router.get("/tickets/:orderId", getTicketOrderDetail);
-
-// ─── Premium ──────────────────────────────────────────────────────────────────
-router.post("/premium", submitPremiumRequest);
 router.get("/premium", getMyPremiumRequests);
-router.post("/premium/:requestId/pay", initiatePremiumPayment);
-router.post("/premium/:requestId/pay/confirm", confirmPremiumPayment);
+
+// ─── Committing / commerce actions (gated by exploreCommerceGuard) ──────────────
+// Blocked with 503 EXPLORE_COMING_SOON until EXPLORE_COMMERCE_LIVE=true.
+
+// Event circle (Iteration 2: RSVP lifecycle)
+router.post("/events/:eventId/rsvp", exploreCommerceGuard, createRsvp);
+router.post("/events/:eventId/rsvp/cancel", exploreCommerceGuard, cancelRsvp);
+router.patch("/events/:eventId/rsvp", exploreCommerceGuard, updateRsvpVisibility);
+router.post("/events/:eventId/wave", exploreCommerceGuard, wave);
+router.post("/events/:eventId/checkin", exploreCommerceGuard, checkin);
+
+// Date bookings
+router.post("/bookings", exploreCommerceGuard, createBooking);
+router.post("/bookings/:bookingId/pay", exploreCommerceGuard, initiateBookingPayment);
+router.post("/bookings/:bookingId/pay/confirm", exploreCommerceGuard, confirmBookingPayment);
+router.post("/bookings/:bookingId/invite-response", exploreCommerceGuard, respondToInvite);
+router.post("/bookings/:bookingId/cancel", exploreCommerceGuard, cancelBooking);
+
+// Event tickets
+router.post("/tickets", exploreCommerceGuard, initiateTicketPurchase);
+router.post("/tickets/:orderId/pay/confirm", exploreCommerceGuard, confirmTicketPayment);
+
+// Premium
+router.post("/premium", exploreCommerceGuard, submitPremiumRequest);
+router.post("/premium/:requestId/pay", exploreCommerceGuard, initiatePremiumPayment);
+router.post("/premium/:requestId/pay/confirm", exploreCommerceGuard, confirmPremiumPayment);
 
 export default router;

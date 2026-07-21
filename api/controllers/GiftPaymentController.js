@@ -2,19 +2,14 @@ import crypto from "crypto";
 import GiftIntent from "../models/GiftIntentModel.js";
 import GiftOrder from "../models/GiftOrder.js";
 import GiftPayment from "../models/GiftPaymentModel.js";
-import UserProfile from "../models/UserProfile.js";
 import notificationService from "../services/notificationService.js";
 import { NOTIFICATION_TYPES } from "../services/notifications/notificationTypes.js";
 import {
-  getGiftPaymentMode,
   createGiftPayment,
   verifyGiftPayment,
 } from "../services/giftPaymentProvider.js";
-import {
-  generateOrderCode,
-  isDeliveryAddressUsable,
-} from "../services/giftOrderService.js";
-import { alertNewGiftOrder } from "../services/opsAlertService.js";
+import { finalizeGiftPayment } from "../services/giftFinalizeService.js";
+import { alertUpiPaymentPendingVerification } from "../services/opsAlertService.js";
 
 /**
  * STEP 1 — Initiate payment for an intent (SENDER ONLY, payment-first MVP).
@@ -58,7 +53,9 @@ export const initiateGiftPayment = async (req, res) => {
 
     const idempotencyKey = intent._id.toString();
 
-    // Reuse any existing payment for this intent.
+    // Reuse any existing payment for this intent — a preferredMode override
+    // on a retry is a no-op by design; you can't switch payment method
+    // mid-flight without cancelling and re-initiating.
     const existing = await GiftPayment.findOne({ idempotencyKey });
     if (existing) {
       if (existing.status === "PAID") {
@@ -80,14 +77,28 @@ export const initiateGiftPayment = async (req, res) => {
         currency: existing.currency,
         mode: existing.mode,
         providerOrderId: existing.providerOrderId || null,
+        upiDeepLink: existing.upi?.deepLink || null,
+        payeeVpa: existing.upi?.payeeVpa || null,
+        razorpayKeyId:
+          existing.mode === "RAZORPAY" ? process.env.RAZORPAY_KEY_ID || null : null,
       });
     }
 
-    // Ask the provider adapter to create an order (placeholder or razorpay).
+    // Razorpay stays available as an explicit, opt-in fallback (e.g. no UPI
+    // app installed) even while UPI is the global default — gated by an ops
+    // kill-switch so it can be disabled without a code change if needed.
+    const requestedMode = String(req.body?.preferredMode || "").toUpperCase();
+    const razorpayFallbackEnabled =
+      String(process.env.GIFT_RAZORPAY_FALLBACK_ENABLED || "true").toLowerCase() !== "false";
+    const modeOverride =
+      requestedMode === "RAZORPAY" && razorpayFallbackEnabled ? "RAZORPAY" : undefined;
+
+    // Ask the provider adapter to create an order (UPI, razorpay, or placeholder).
     const providerResult = await createGiftPayment({
       amount,
       currency: "INR",
       intentId: intent._id.toString(),
+      modeOverride,
     });
 
     const payment = await GiftPayment.create({
@@ -101,6 +112,14 @@ export const initiateGiftPayment = async (req, res) => {
       providerOrderId: providerResult.providerOrderId,
       idempotencyKey,
       status: "INITIATED",
+      upi:
+        providerResult.mode === "UPI"
+          ? {
+              payeeVpa: providerResult.payeeVpa,
+              payeeName: providerResult.payeeName,
+              deepLink: providerResult.upiDeepLink,
+            }
+          : undefined,
     });
 
     return res.status(201).json({
@@ -110,6 +129,8 @@ export const initiateGiftPayment = async (req, res) => {
       currency: "INR",
       mode: payment.mode,
       providerOrderId: payment.providerOrderId || null,
+      upiDeepLink: providerResult.upiDeepLink || null,
+      payeeVpa: providerResult.payeeVpa || null,
       razorpayKeyId:
         payment.mode === "RAZORPAY" ? process.env.RAZORPAY_KEY_ID || null : null,
     });
@@ -120,138 +141,6 @@ export const initiateGiftPayment = async (req, res) => {
       message: "Failed to initiate gift payment",
     });
   }
-};
-
-/**
- * Shared finalize step, called after a payment is verified as successful —
- * either by the client's confirm call or by the Razorpay webhook (whichever
- * arrives first; the other is a no-op thanks to the idempotency guards here).
- *
- * Marks payment/intent PAID, creates the GiftOrder idempotently with a frozen
- * recipient address snapshot (sender never sees it), fires the ops alert, and
- * notifies both participants. Returns the order (existing or newly created).
- */
-const finalizeGiftPayment = async ({ payment, intent, providerPaymentId }) => {
-  const mode = getGiftPaymentMode();
-
-  // Mark payment PAID.
-  payment.status = "PAID";
-  payment.providerPaymentId = providerPaymentId || payment.providerPaymentId || null;
-  payment.verifiedAt = new Date();
-  payment.meta = { ...(payment.meta || {}), mode };
-  await payment.save();
-
-  // Mark intent PAID.
-  intent.status = "PAID";
-  intent.senderPaidAmount = payment.amount;
-  intent.senderPaidAt = new Date();
-  await intent.save();
-
-  // Create the order once (idempotent on intentId).
-  let order = await GiftOrder.findOne({ intentId: intent._id });
-  if (!order) {
-    // Freeze recipient delivery address (never exposed to sender).
-    const recipientProfile = await UserProfile.findById(intent.recipientId).select(
-      "deliveryAddress phoneNumber name"
-    );
-    const addr = recipientProfile?.deliveryAddress || {};
-    const addressMissing = !isDeliveryAddressUsable(addr);
-
-    const deliverySnapshot = {
-      name: addr.name || recipientProfile?.name || "",
-      phone: addr.phone || recipientProfile?.phoneNumber || "",
-      line1: addr.line1 || "",
-      line2: addr.line2 || "",
-      city: addr.city || "",
-      state: addr.state || "",
-      pincode: addr.pincode || "",
-      landmark: addr.landmark || "",
-      label: addr.label || "",
-    };
-
-    const snap = intent.catalogSnapshot || {};
-
-    order = await GiftOrder.create({
-      chatId: intent.chatId,
-      intentId: intent._id,
-      paymentId: payment._id,
-      orderCode: generateOrderCode(),
-      senderId: intent.senderId,
-      recipientId: intent.recipientId,
-      tier: intent.tier,
-      catalogItemId: intent.catalogItemId || null,
-      items: intent.items,
-      source: "FUSE_MANUAL",
-      totalAmount: intent.totalAmount,
-      senderPaidAmount: intent.senderPaidAmount || 0,
-      currency: "INR",
-      platformFee: Number(snap.platformFee || 0),
-      deliveryFee: Number(snap.deliveryFee || 0),
-      vendorCost: 0,
-      status: "ADMIN_REVIEW",
-      addressMissing,
-      deliverySnapshot,
-      statusHistory: [
-        {
-          status: "PAID",
-          action: "PAYMENT_CONFIRMED",
-          byUserId: intent.senderId,
-          byRole: "SENDER",
-          at: new Date(),
-        },
-        {
-          status: "ADMIN_REVIEW",
-          action: "AUTO_SUBMITTED",
-          byRole: "SYSTEM",
-          note: addressMissing ? "Recipient address missing — held for review" : "",
-          at: new Date(),
-        },
-      ],
-    });
-
-    // Fire ops alert (email + WhatsApp + admin push) without blocking the caller.
-    alertNewGiftOrder(order).catch((e) =>
-      console.error("[GIFT] ops alert failed", e)
-    );
-  }
-
-  // Notify sender + recipient — fire-and-forget so a push failure never
-  // causes a 500 after the order is already persisted.
-  notificationService
-    .sendToUser(
-      intent.senderId,
-      notificationService.buildNotificationPayload({
-        type: NOTIFICATION_TYPES.GIFT_PAYMENT_SUCCESS,
-        data: {
-          intentId: intent._id.toString(),
-          orderId: order._id.toString(),
-          chatId: String(intent.chatId),
-          paymentId: payment._id.toString(),
-          screen: "GiftOrderTrackingScreen",
-        },
-      })
-    )
-    .catch((e) => console.error("[GIFT] sender notify failed", e));
-
-  if (intent.recipientId.toString() !== intent.senderId.toString()) {
-    notificationService
-      .sendToUser(
-        intent.recipientId,
-        notificationService.buildNotificationPayload({
-          type: NOTIFICATION_TYPES.GIFT_ORDER_STATUS,
-          title: "You have a gift! 🎁",
-          body: "Someone sent you a gift. It's being processed.",
-          data: {
-            orderId: order._id.toString(),
-            chatId: String(intent.chatId),
-            screen: "GiftOrderTrackingScreen",
-          },
-        })
-      )
-      .catch((e) => console.error("[GIFT] recipient notify failed", e));
-  }
-
-  return order;
 };
 
 /**
@@ -344,6 +233,65 @@ export const confirmGiftPayment = async (req, res) => {
         paymentStatus: payment.status,
         intentStatus: intent.status,
         order: null,
+      });
+    }
+
+    // UPI: nothing is auto-verified — the user submits a UTR and an admin
+    // manually cross-checks it against the bank statement before the order
+    // is created (see AdminGiftController.verifyUpiPayment).
+    if (payment.mode === "UPI") {
+      const { utr, note } = req.body || {};
+      if (!utr || !String(utr).trim()) {
+        return res.status(400).json({
+          success: false,
+          message: "UTR/transaction reference is required",
+        });
+      }
+
+      // Idempotent re-submit: don't re-alert or overwrite submittedAt.
+      if (payment.status === "PENDING_VERIFICATION") {
+        return res.status(200).json({
+          success: true,
+          paymentStatus: payment.status,
+          intentStatus: intent.status,
+          message: "Already submitted, awaiting admin verification",
+        });
+      }
+
+      payment.status = "PENDING_VERIFICATION";
+      payment.upi = {
+        ...(payment.upi || {}),
+        submittedUtr: String(utr).trim(),
+        submittedAt: new Date(),
+        userNote: note ? String(note).slice(0, 500) : undefined,
+      };
+      await payment.save();
+
+      // Suspicious-signal flag (not a hard block) — real bank UTRs are
+      // unique per transaction, so a repeat is a signal for the admin.
+      const duplicate = await GiftPayment.findOne({
+        _id: { $ne: payment._id },
+        "upi.submittedUtr": payment.upi.submittedUtr,
+      }).select("_id");
+      if (duplicate) {
+        console.warn("[GIFT UPI] duplicate UTR submitted", {
+          utr: payment.upi.submittedUtr,
+          paymentId: payment._id.toString(),
+          duplicateOf: duplicate._id.toString(),
+        });
+      }
+
+      alertUpiPaymentPendingVerification(payment, intent, {
+        duplicateSuspected: !!duplicate,
+      }).catch((e) =>
+        console.error("[GIFT] UPI pending-verification alert failed", e)
+      );
+
+      return res.status(200).json({
+        success: true,
+        paymentStatus: payment.status,
+        intentStatus: intent.status,
+        message: "Submitted — awaiting verification",
       });
     }
 
