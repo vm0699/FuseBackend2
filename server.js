@@ -685,6 +685,70 @@ io.on("connection", (socket) => {
     }
   });
 
+  // In-call chat, scoped to the Agora channel the two matched users share.
+  // Only a socket whose authenticated userId is actually part of the
+  // "matched" VideoQueueEntry for this roomId may join — same ownership
+  // check used for Agora/Twilio token issuance, so a random authenticated
+  // user can't join and read someone else's call chat by guessing a
+  // channel name.
+  socket.on("join_call_room", async ({ channelName } = {}) => {
+    try {
+      const userId = socket.data.userId;
+      if (!userId || !channelName) {
+        socket.emit("call_chat_error", { message: "Missing channel" });
+        return;
+      }
+
+      const entry = await VideoQueueEntry.findOne({
+        status: "matched",
+        roomId: channelName,
+        $or: [{ userId }, { matchedUserId: userId }],
+      });
+
+      if (!entry) {
+        socket.emit("call_chat_error", { message: "Not authorized for this call" });
+        return;
+      }
+
+      socket.data.callRoom = channelName;
+      socket.join(`video-call:${channelName}`);
+      logVideoQueueEvent("call_room_joined", {
+        userId,
+        channelName,
+        socketId: socket.id,
+      });
+    } catch (error) {
+      console.error("join_call_room error:", error);
+      socket.emit("call_chat_error", { message: "Failed to join call chat" });
+    }
+  });
+
+  socket.on("call_chat_message", ({ channelName, text } = {}) => {
+    const userId = socket.data.userId;
+    const trimmed = String(text || "").trim().slice(0, 1000);
+
+    // Must have already joined this exact room via join_call_room — cheap
+    // to check per-message since it's just the socket's own in-memory state.
+    if (!userId || !channelName || !trimmed || socket.data.callRoom !== channelName) {
+      return;
+    }
+
+    socket.to(`video-call:${channelName}`).emit("call_chat_message", {
+      text: trimmed,
+      at: new Date().toISOString(),
+    });
+  });
+
+  socket.on("leave_call_room", ({ channelName } = {}) => {
+    const room = channelName || socket.data.callRoom;
+    if (room) {
+      socket.leave(`video-call:${room}`);
+    }
+    if (socket.data.callRoom === room) {
+      socket.data.callRoom = null;
+    }
+  });
+
   socket.on("disconnect", async () => {
     try {
       logVideoQueueEvent("socket_disconnected", {
