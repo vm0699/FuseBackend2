@@ -10,6 +10,7 @@ import client from "../config/twilio.js";
 import fs from 'fs';
 import path from 'path';
 import jwt from 'jsonwebtoken';
+import { isValidAdultDob } from '../lib/ageValidation.js';
 
 function normalizeUsernameInput(value) {
   if (typeof value !== "string") return null;
@@ -248,7 +249,15 @@ export const saveUserProfile = async (req, res) => {
 
 // intro
 if (intro?.name) existingUser.name = intro.name;
-if (intro?.dob) existingUser.dateOfBirth = intro.dob;
+if (intro?.dob) {
+  if (!isValidAdultDob(intro.dob)) {
+    return res.status(400).json({
+      success: false,
+      message: "A valid date of birth for someone 18 or older is required.",
+    });
+  }
+  existingUser.dateOfBirth = intro.dob;
+}
 
 // options
 if (typeof options?.username !== "undefined") {
@@ -288,6 +297,12 @@ if (Array.isArray(prompts) && prompts.length > 0) {
     }
 
     // ✅ CRITICAL 2.1 CHECKPOINT — ONBOARDING COMPLETE
+    if (!isValidAdultDob(existingUser.dateOfBirth)) {
+      return res.status(400).json({
+        success: false,
+        message: "A valid date of birth for someone 18 or older is required to complete onboarding.",
+      });
+    }
     existingUser.onboardingStage = "COMPLETE";
 
     console.log("💾 Saving updated profile with onboarding COMPLETE…");
@@ -1700,6 +1715,11 @@ export const updateUserProfile = async (req, res) => {
 
     let anyFieldUpdated = false;
     const pendingFileDeletes = [];
+    // Captured before the loop mutates onboardingStage — only a genuine
+    // transition into COMPLETE needs the age gate below, not every
+    // subsequent edit by an already-onboarded user (some legacy users may
+    // have missing/invalid dateOfBirth on file from before this check existed).
+    const wasOnboardingComplete = user.onboardingStage === "COMPLETE";
 
     const deleteLocalUploadIfPresent = (fileUrl) => {
       if (typeof fileUrl !== "string" || !fileUrl.includes("/uploads/")) {
@@ -1752,6 +1772,16 @@ export const updateUserProfile = async (req, res) => {
         }
       }
 
+      if (key === "dateOfBirth") {
+        if (!isValidAdultDob(value)) {
+          console.log(
+            "⚠️ [updateUserProfile] Ignoring invalid/underage dateOfBirth update:",
+            value
+          );
+          continue;
+        }
+      }
+
       if (key === "onboardingStage") {
         if (!ALLOWED_ONBOARDING_STAGES.includes(value)) {
           console.log(
@@ -1799,6 +1829,18 @@ export const updateUserProfile = async (req, res) => {
       return res.status(400).json({
         success: false,
         message: "No valid fields provided to update.",
+      });
+    }
+
+    const completingOnboardingNow =
+      !wasOnboardingComplete && user.onboardingStage === "COMPLETE";
+    if (completingOnboardingNow && !isValidAdultDob(user.dateOfBirth)) {
+      console.log(
+        "❌ [updateUserProfile] Refusing onboarding COMPLETE — invalid/missing adult dateOfBirth"
+      );
+      return res.status(400).json({
+        success: false,
+        message: "A valid date of birth for someone 18 or older is required to complete onboarding.",
       });
     }
 

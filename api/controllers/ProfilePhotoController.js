@@ -1,6 +1,7 @@
 import path from "path";
 import UserProfile from "../models/UserProfile.js";
 import { DeleteObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
+import { isValidAdultDob } from "../lib/ageValidation.js";
 
 const s3ClientConfig = {
   region: process.env.AWS_REGION,
@@ -259,6 +260,16 @@ export const uploadPhotos = async (req, res) => {
       typeof requestedOnboardingStage === "string" &&
       allowedOnboardingStages.includes(requestedOnboardingStage)
     ) {
+      const completingOnboardingNow =
+        requestedOnboardingStage === "COMPLETE" &&
+        user.onboardingStage !== "COMPLETE";
+      if (completingOnboardingNow && !isValidAdultDob(user.dateOfBirth)) {
+        await deleteStoredPhotos(uploadedFileUrls);
+        return res.status(400).json({
+          success: false,
+          message: "A valid date of birth for someone 18 or older is required to complete onboarding.",
+        });
+      }
       user.onboardingStage = requestedOnboardingStage;
     }
 
