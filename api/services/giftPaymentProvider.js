@@ -56,7 +56,11 @@ export const createGiftPayment = async ({ amount, currency = "INR", intentId, mo
     }
     // txnRef doubles as tn/tr in the deep link and as providerOrderId, so an
     // admin eyeballing a bank statement narration has something to match.
-    const txnRef = `gift_${intentId}`;
+    // NPCI's UPI deep-link spec requires `tr` to be alphanumeric only (no
+    // underscores/hyphens) — a non-conforming `tr` can be rejected by the
+    // beneficiary bank's UPI switch, which GPay then surfaces as a vague
+    // "recipient's server is down" instead of a real error.
+    const txnRef = `gift${intentId}`;
     const deepLink =
       `upi://pay?pa=${encodeURIComponent(payeeVpa)}` +
       `&pn=${encodeURIComponent(payeeName)}` +
